@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "arkview"
+version = "4.0.0"
+description = "Archived Image Viewer - High-performance image browser for archives"
+readme = "README.md"
+license = {text = "BSD-2-Clause"}
+authors = [{name = "Arkview Contributors"}]
+requires-python = ">=3.8"
+dependencies = [
+    "Pillow>=9.0.0",
+    "pyximport; python_version < '3.10'",
+]
+optional-dependencies = {
+    "dnd" = ["tkinterdnd2>=0.3.0"],
+    "dev" = ["pytest>=7.0"],
+}
+
+[project.scripts]
+arkview = "arkview.main:main"
+
+[tool.maturin]
+python-source = "src/python"
+module-name = "arkview.arkview_core"
