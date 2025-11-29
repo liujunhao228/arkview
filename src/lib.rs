@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
@@ -121,6 +122,32 @@ impl ZipScanner {
         };
 
         Ok((is_valid, members, mod_time, Some(file_size), image_count))
+    }
+
+    fn batch_analyze_zips(
+        &self,
+        zip_paths: Vec<String>,
+        collect_members: Option<bool>,
+    ) -> PyResult<Vec<(String, bool, Option<Vec<String>>, Option<f64>, Option<u64>, u32)>> {
+        let should_collect = collect_members.unwrap_or(true);
+        
+        // Use rayon for parallel processing
+        let results: Vec<(String, bool, Option<Vec<String>>, Option<f64>, Option<u64>, u32)> = zip_paths
+            .into_par_iter()
+            .map(|zip_path| {
+                let analysis_result = self.analyze_zip(&zip_path, Some(should_collect));
+                match analysis_result {
+                    Ok((is_valid, members, mod_time, file_size, image_count)) => {
+                        (zip_path, is_valid, members, mod_time, file_size, image_count)
+                    }
+                    Err(_) => {
+                        (zip_path, false, None, None, None, 0)
+                    }
+                }
+            })
+            .collect();
+        
+        Ok(results)
     }
 }
 

@@ -218,6 +218,28 @@ class ZipScanner:
 
         return is_valid, all_image_members if (is_valid and collect_members) else None, mod_time, file_size, image_count
 
+    def batch_analyze_zips(
+        self,
+        zip_paths: List[str],
+        collect_members: bool = True
+    ) -> List[Tuple[str, bool, Optional[List[str]], Optional[float], Optional[int], int]]:
+        """
+        Batch analyzes multiple ZIP files in parallel using Rust.
+        Returns list of (zip_path, is_valid, members, mod_time, file_size, image_count) tuples.
+        """
+        if RUST_AVAILABLE and self.rust_scanner:
+            try:
+                return self.rust_scanner.batch_analyze_zips(zip_paths, collect_members)
+            except Exception as e:
+                print(f"Batch analysis error, falling back to sequential: {e}")
+        
+        # Fallback: sequential processing
+        results = []
+        for zip_path in zip_paths:
+            is_valid, members, mod_time, file_size, image_count = self.analyze_zip(zip_path, collect_members)
+            results.append((zip_path, is_valid, members, mod_time, file_size, image_count))
+        return results
+
     @staticmethod
     def _is_image_file(filename: str) -> bool:
         IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'}
