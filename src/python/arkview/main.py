@@ -15,10 +15,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageTk
-from tkinter import Menu, filedialog, messagebox
+from tkinter import filedialog, messagebox, Menu
 from tkinter.scrolledtext import ScrolledText
-from tkinter import ttk
-from tkinter.ttk import PanedWindow
+from ttkbootstrap import ttk, Style
 
 from .core import (
     ZipScanner, ZipFileManager, LRUCache, load_image_data_async,
@@ -117,61 +116,88 @@ class MainApp:
     def _setup_ui(self):
         """Setup the main UI."""
         main_frame = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         # --- Left Panel: ZIP File List ---
-        left_frame = ttk.Frame(main_frame)
+        left_frame = ttk.Frame(main_frame, padding=5)
         main_frame.add(left_frame, weight=1)
 
-        left_label = ttk.Label(left_frame, text="Archives", font=("", 10, "bold"))
-        left_label.pack(fill=tk.X, pady=(0, 5))
+        left_label = ttk.Label(left_frame, text="📦 Archives", font=("", 11, "bold"))
+        left_label.pack(fill=tk.X, pady=(0, 8))
 
-        self.zip_listbox = tk.Listbox(left_frame, activestyle='none')
+        list_container = ttk.Frame(left_frame)
+        list_container.pack(fill=tk.BOTH, expand=True)
+
+        self.zip_listbox = tk.Listbox(
+            list_container, 
+            activestyle='none',
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=1,
+            bg="#1f2123",
+            fg="#f8f9fa",
+            selectbackground="#00bc8c",
+            selectforeground="#101214",
+            font=("Segoe UI", 10)
+        )
         self.zip_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
 
-        left_scrollbar = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=self.zip_listbox.yview)
+        left_scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.zip_listbox.yview)
         left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.zip_listbox.config(yscrollcommand=left_scrollbar.set)
+        self.zip_listbox.config(yscrollcommand=left_scrollbar.set, highlightbackground="#2f3336")
 
         self.zip_listbox.bind("<<ListboxSelect>>", self._on_zip_selected)
 
         # --- Right Panel: Preview and Details ---
-        right_frame = ttk.Frame(main_frame)
+        right_frame = ttk.Frame(main_frame, padding=5)
         main_frame.add(right_frame, weight=1)
 
-        right_label = ttk.Label(right_frame, text="Preview", font=("", 10, "bold"))
-        right_label.pack(fill=tk.X, pady=(0, 5))
+        right_label = ttk.Label(right_frame, text="🖼️  Preview", font=("", 11, "bold"))
+        right_label.pack(fill=tk.X, pady=(0, 8))
 
         # Preview navigation controls
         preview_nav_frame = ttk.Frame(right_frame)
-        preview_nav_frame.pack(fill=tk.X, pady=(0, 5))
+        preview_nav_frame.pack(fill=tk.X, pady=(0, 8))
 
         self.preview_prev_button = ttk.Button(
-            preview_nav_frame, text="< Prev", command=self._preview_prev, width=8
+            preview_nav_frame, 
+            text="◀ Prev", 
+            command=self._preview_prev, 
+            width=10,
+            bootstyle="secondary-outline"
         )
-        self.preview_prev_button.pack(side=tk.LEFT)
+        self.preview_prev_button.pack(side=tk.LEFT, padx=(0, 5))
         self.preview_prev_button.config(state=tk.DISABLED)
 
         self.preview_info_label = ttk.Label(
-            preview_nav_frame, text="", anchor=tk.CENTER
+            preview_nav_frame, text="", anchor=tk.CENTER, font=("", 9)
         )
         self.preview_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
 
         self.preview_next_button = ttk.Button(
-            preview_nav_frame, text="Next >", command=self._preview_next, width=8
+            preview_nav_frame, 
+            text="Next ▶", 
+            command=self._preview_next, 
+            width=10,
+            bootstyle="secondary-outline"
         )
-        self.preview_next_button.pack(side=tk.RIGHT)
+        self.preview_next_button.pack(side=tk.RIGHT, padx=(5, 0))
         self.preview_next_button.config(state=tk.DISABLED)
 
+        preview_container = ttk.Frame(right_frame, relief=tk.FLAT, borderwidth=1)
+        preview_container.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
         self.preview_label = tk.Label(
-            right_frame,
-            background="lightgray",
+            preview_container,
+            background="#2a2d2e",
             height=15,
             text="Select a ZIP file",
             anchor=tk.CENTER,
-            cursor="hand2"
+            cursor="hand2",
+            fg="#ffffff",
+            font=("", 10)
         )
-        self.preview_label.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        self.preview_label.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
         self.preview_label.bind("<Button-1>", lambda event: self._open_viewer())
         self.preview_label.bind("<MouseWheel>", self._on_preview_scroll)
         if platform.system() == "Linux":
@@ -181,7 +207,7 @@ class MainApp:
         self._reset_preview()
 
         # --- Details Panel ---
-        details_frame = ttk.LabelFrame(right_frame, text="Details", padding=5)
+        details_frame = ttk.LabelFrame(right_frame, text="ℹ️  Details", padding=8)
         details_frame.pack(fill=tk.X)
 
         self.details_text = ScrolledText(
@@ -190,22 +216,57 @@ class MainApp:
         self.details_text.pack(fill=tk.BOTH, expand=True)
 
         # --- Bottom Control Panel ---
-        bottom_frame = ttk.Frame(self.root)
-        bottom_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=5, pady=5)
+        bottom_frame = ttk.Frame(self.root, padding=(8, 5))
+        bottom_frame.pack(fill=tk.X, side=tk.BOTTOM)
 
-        scan_button = ttk.Button(bottom_frame, text="Scan Directory", command=self._scan_directory)
+        button_container = ttk.Frame(bottom_frame)
+        button_container.pack(side=tk.LEFT)
+
+        scan_button = ttk.Button(
+            button_container, 
+            text="📁 Scan Directory", 
+            command=self._scan_directory,
+            bootstyle="primary",
+            width=16
+        )
         scan_button.pack(side=tk.LEFT, padx=(0, 5))
 
-        clear_button = ttk.Button(bottom_frame, text="Clear", command=self._clear_list)
+        view_button = ttk.Button(
+            button_container, 
+            text="👁️ View", 
+            command=self._open_viewer,
+            bootstyle="success",
+            width=10
+        )
+        view_button.pack(side=tk.LEFT, padx=(0, 5))
+
+        clear_button = ttk.Button(
+            button_container, 
+            text="🗑️ Clear", 
+            command=self._clear_list,
+            bootstyle="warning-outline",
+            width=10
+        )
         clear_button.pack(side=tk.LEFT, padx=(0, 5))
 
-        settings_button = ttk.Button(bottom_frame, text="Settings", command=self._show_settings)
-        settings_button.pack(side=tk.LEFT, padx=(0, 5))
+        settings_button = ttk.Button(
+            button_container, 
+            text="⚙️ Settings", 
+            command=self._show_settings,
+            bootstyle="secondary-outline",
+            width=12
+        )
+        settings_button.pack(side=tk.LEFT)
 
-        view_button = ttk.Button(bottom_frame, text="View", command=self._open_viewer)
-        view_button.pack(side=tk.LEFT)
+        status_container = ttk.Frame(bottom_frame)
+        status_container.pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
-        self.status_label = ttk.Label(bottom_frame, text="Ready")
+        self.status_label = ttk.Label(
+            status_container, 
+            text="Ready", 
+            font=("", 9),
+            anchor=tk.E
+        )
         self.status_label.pack(side=tk.RIGHT, padx=(5, 0))
 
     def _setup_menu(self):
@@ -664,6 +725,9 @@ def main():
         root = TkinterDnD.Tk()
     else:
         root = tk.Tk()
+    
+    style = Style(theme="darkly", master=root)
+    style.configure('.', font=("Segoe UI", 10))
 
     app = MainApp(root)
     root.mainloop()

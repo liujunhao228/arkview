@@ -13,9 +13,8 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageTk
-from tkinter import (BooleanVar, Frame, Label, Menu, Toplevel, filedialog, messagebox)
-from tkinter import ttk
-from tkinter.ttk import PanedWindow, Progressbar
+from tkinter import BooleanVar, Menu, Toplevel, filedialog, messagebox
+from ttkbootstrap import ttk
 
 from .core import (
     ZipScanner, ZipFileManager, LRUCache, load_image_data_async,
@@ -47,7 +46,7 @@ class SettingsDialog(Toplevel):
     """Dialog window for application settings."""
     def __init__(self, master, current_settings: Dict[str, Any]):
         super().__init__(master)
-        self.title("Settings")
+        self.title("⚙️ Settings")
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
@@ -65,38 +64,60 @@ class SettingsDialog(Toplevel):
             value=self.result_settings.get('preload_next_thumbnail', True)
         )
 
-        main_frame = ttk.Frame(self, padding="10")
+        main_frame = ttk.Frame(self, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
+
+        title_label = ttk.Label(
+            main_frame,
+            text="Application Settings",
+            font=("", 12, "bold")
+        )
+        title_label.pack(anchor=tk.W, pady=(0, 10))
 
         perf_check = ttk.Checkbutton(
             main_frame,
-            text="Performance Mode (Faster, Lower Quality)",
+            text="⚡ Performance Mode (Faster, Lower Quality)",
             variable=self.performance_mode_var,
-            command=self._update_dependent_settings
+            command=self._update_dependent_settings,
+            bootstyle="round-toggle"
         )
-        perf_check.pack(anchor=tk.W, pady=5)
+        perf_check.pack(anchor=tk.W, pady=6)
 
         viewer_check = ttk.Checkbutton(
             main_frame,
-            text="Enable Multi-Image Viewer (Click Preview)",
-            variable=self.viewer_enabled_var
+            text="👁️ Enable Multi-Image Viewer (Click Preview)",
+            variable=self.viewer_enabled_var,
+            bootstyle="round-toggle"
         )
-        viewer_check.pack(anchor=tk.W, pady=5)
+        viewer_check.pack(anchor=tk.W, pady=6)
 
         self.preload_thumb_check = ttk.Checkbutton(
             main_frame,
-            text="Preload Next Thumbnail (in Preview)",
-            variable=self.preload_thumb_var
+            text="🔄 Preload Next Thumbnail (in Preview)",
+            variable=self.preload_thumb_var,
+            bootstyle="round-toggle"
         )
-        self.preload_thumb_check.pack(anchor=tk.W, pady=5)
+        self.preload_thumb_check.pack(anchor=tk.W, pady=6)
 
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(15, 0))
 
-        ok_button = ttk.Button(button_frame, text="OK", command=self._on_ok)
+        ok_button = ttk.Button(
+            button_frame, 
+            text="OK", 
+            command=self._on_ok,
+            bootstyle="success",
+            width=10
+        )
         ok_button.pack(side=tk.RIGHT, padx=(5, 0))
 
-        cancel_button = ttk.Button(button_frame, text="Cancel", command=self._on_cancel)
+        cancel_button = ttk.Button(
+            button_frame, 
+            text="Cancel", 
+            command=self._on_cancel,
+            bootstyle="secondary",
+            width=10
+        )
         cancel_button.pack(side=tk.RIGHT)
 
         self._update_dependent_settings()
@@ -166,9 +187,9 @@ class ImageViewerWindow(Toplevel):
         self._is_loading: bool = False
         self._is_fullscreen: bool = False
 
-        self.title(f"View: {os.path.basename(zip_path)}")
-        self.geometry("800x600")
-        self.minsize(400, 300)
+        self.title(f"👁️ Viewer: {os.path.basename(zip_path)}")
+        self.geometry("900x650")
+        self.minsize(500, 400)
 
         self._setup_ui()
         self._setup_bindings()
@@ -184,23 +205,49 @@ class ImageViewerWindow(Toplevel):
         main_frame = ttk.Frame(self)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        top_frame = ttk.Frame(main_frame, padding=5)
+        top_frame = ttk.Frame(main_frame, padding=8)
         top_frame.pack(fill=tk.X)
 
-        self.prev_button = ttk.Button(top_frame, text="< Prev", command=self._show_prev, width=8)
+        self.prev_button = ttk.Button(
+            top_frame, 
+            text="◀ Prev", 
+            command=self._show_prev, 
+            width=10,
+            bootstyle="secondary-outline"
+        )
         self.prev_button.pack(side=tk.LEFT)
 
-        self.image_info_label = ttk.Label(top_frame, text="Image 1 / X", anchor=tk.CENTER)
+        self.image_info_label = ttk.Label(
+            top_frame, 
+            text="Image 1 / X", 
+            anchor=tk.CENTER,
+            font=("", 10)
+        )
         self.image_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
 
-        self.next_button = ttk.Button(top_frame, text="Next >", command=self._show_next, width=8)
+        self.next_button = ttk.Button(
+            top_frame, 
+            text="Next ▶", 
+            command=self._show_next, 
+            width=10,
+            bootstyle="secondary-outline"
+        )
         self.next_button.pack(side=tk.RIGHT)
 
-        self.image_label = tk.Label(main_frame, background="darkgrey", anchor=tk.CENTER)
-        self.image_label.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.image_label = tk.Label(
+            main_frame, 
+            background="#1c1e1f", 
+            anchor=tk.CENTER
+        )
+        self.image_label.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        self.status_frame = ttk.Frame(main_frame, padding=(5, 2))
-        self.progress_bar = Progressbar(self.status_frame, mode='indeterminate', maximum=100)
+        self.status_frame = ttk.Frame(main_frame, padding=(8, 4))
+        self.progress_bar = ttk.Progressbar(
+            self.status_frame, 
+            mode='indeterminate', 
+            maximum=100,
+            bootstyle="info-striped"
+        )
         self.status_label = ttk.Label(self.status_frame, text="", anchor=tk.W)
 
     def _setup_bindings(self):
