@@ -177,8 +177,8 @@ class ImageViewerWindow(Toplevel):
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._close_viewer)
 
-        self.after(50, lambda: self.load_image(self.current_index))
-        self.after(100, self.focus_force)
+        self.after(10, lambda: self.load_image(self.current_index))
+        self.after(50, self.focus_force)
 
     def _setup_ui(self):
         main_frame = ttk.Frame(self)
@@ -293,7 +293,7 @@ class ImageViewerWindow(Toplevel):
             self.settings.get('performance_mode', False)
         )
         
-        self.after(50, self._check_load_result)
+        self.after(10, self._check_load_result)
 
     def _check_load_result(self):
         try:

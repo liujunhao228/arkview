@@ -44,7 +44,9 @@ class LRUCache:
             return
         with self._lock:
             try:
-                value.load()
+                # Ensure image is fully loaded before caching
+                if hasattr(value, 'load'):
+                    value.load()
             except Exception as e:
                 print(f"Cache Warning: Failed to load image data before caching key {key}: {e}")
                 return
@@ -54,7 +56,14 @@ class LRUCache:
                 self.cache.move_to_end(key)
             else:
                 if len(self.cache) >= self.capacity:
-                    self.cache.popitem(last=False)
+                    # Remove oldest entry
+                    evicted_key, evicted_image = self.cache.popitem(last=False)
+                    try:
+                        # Close evicted image to free memory
+                        if hasattr(evicted_image, 'close'):
+                            evicted_image.close()
+                    except Exception:
+                        pass
                 self.cache[key] = value
 
     def clear(self):
@@ -80,9 +89,10 @@ class LRUCache:
 
 class ZipFileManager:
     """Manages opening and closing of ZipFile objects to avoid resource leaks."""
-    def __init__(self):
-        self._open_files: dict = {}
+    def __init__(self, max_open_files: int = 10):
+        self._open_files: OrderedDict = OrderedDict()
         self._lock = threading.Lock()
+        self._max_open_files = max_open_files
         if RUST_AVAILABLE:
             self.image_processor = ImageProcessorRust()
 
@@ -92,13 +102,25 @@ class ZipFileManager:
         abs_path = os.path.abspath(path)
         with self._lock:
             if abs_path in self._open_files:
-                return self._open_files[abs_path]
+                zf = self._open_files.pop(abs_path)
+                # Move to end to mark as most recently used
+                self._open_files[abs_path] = zf
+                return zf
             try:
                 if not os.path.exists(abs_path):
                     print(f"ZipManager Warning: File not found at {abs_path}")
                     return None
                 zf = zipfile.ZipFile(path, 'r')
                 self._open_files[abs_path] = zf
+
+                # Enforce LRU capacity
+                if len(self._open_files) > self._max_open_files:
+                    oldest_path, oldest_zf = self._open_files.popitem(last=False)
+                    try:
+                        oldest_zf.close()
+                    except Exception as e:
+                        print(f"ZipManager Warning: Error closing {oldest_path} during eviction: {e}")
+
                 return zf
             except (FileNotFoundError, zipfile.BadZipFile, IsADirectoryError, PermissionError) as e:
                 print(f"ZipManager Error: Failed to open {path}: {e}")
@@ -116,20 +138,19 @@ class ZipFileManager:
         with self._lock:
             if abs_path in self._open_files:
                 try:
-                    self._open_files[abs_path].close()
+                    zf = self._open_files.pop(abs_path)
+                    zf.close()
                 except Exception as e:
                     print(f"ZipManager Warning: Error closing {path}: {e}")
-                del self._open_files[abs_path]
 
     def close_all(self):
         with self._lock:
-            keys_to_close = list(self._open_files.keys())
-            for abs_path in keys_to_close:
+            while self._open_files:
+                abs_path, zf = self._open_files.popitem(last=False)
                 try:
-                    self._open_files[abs_path].close()
+                    zf.close()
                 except Exception as e:
                     print(f"ZipManager Warning: Error closing {abs_path} during close_all: {e}")
-                del self._open_files[abs_path]
 
 
 class ZipScanner:
@@ -137,13 +158,17 @@ class ZipScanner:
     def __init__(self):
         self.rust_scanner = ZipScannerRust() if RUST_AVAILABLE else None
 
-    def analyze_zip(self, zip_path: str) -> Tuple[bool, Optional[List[str]], Optional[float], Optional[int], int]:
+    def analyze_zip(
+        self,
+        zip_path: str,
+        collect_members: bool = True
+    ) -> Tuple[bool, Optional[List[str]], Optional[float], Optional[int], int]:
         """
         Analyzes a ZIP file to determine if it contains *only* image files.
         Uses Rust for performance.
         """
         if RUST_AVAILABLE and self.rust_scanner:
-            return self.rust_scanner.analyze_zip(zip_path)
+            return self.rust_scanner.analyze_zip(zip_path, collect_members)
         
         # Fallback to pure Python if Rust not available
         import zipfile
@@ -178,7 +203,8 @@ class ZipScanner:
 
                     if self._is_image_file(filename):
                         image_count += 1
-                        all_image_members.append(filename)
+                        if collect_members:
+                            all_image_members.append(filename)
                     else:
                         contains_only_images = False
                         all_image_members = []
@@ -190,7 +216,7 @@ class ZipScanner:
             print(f"Analysis Error: {type(e).__name__} - {e}")
             return False, None, mod_time, file_size, image_count
 
-        return is_valid, all_image_members if is_valid else None, mod_time, file_size, image_count
+        return is_valid, all_image_members if (is_valid and collect_members) else None, mod_time, file_size, image_count
 
     @staticmethod
     def _is_image_file(filename: str) -> bool:
@@ -235,14 +261,17 @@ def load_image_data_async(
         cached_image = cache.get(cache_key)
         if cached_image is not None:
             try:
-                img_to_process = cached_image.copy()
                 if target_size:
+                    img_to_process = cached_image.copy()
                     resampling_method = (
                         Image.Resampling.NEAREST if performance_mode
                         else Image.Resampling.LANCZOS
                     )
                     img_to_process.thumbnail(target_size, resampling_method)
-                result_queue.put(LoadResult(success=True, data=img_to_process, cache_key=cache_key))
+                    result_queue.put(LoadResult(success=True, data=img_to_process, cache_key=cache_key))
+                else:
+                    # Return the cached image directly if no resizing needed
+                    result_queue.put(LoadResult(success=True, data=cached_image, cache_key=cache_key))
                 return
             except Exception as e:
                 print(f"Async Load Warning: Error processing cached image for {cache_key}: {e}")
@@ -268,9 +297,10 @@ def load_image_data_async(
             img = ImageOps.exif_transpose(Image.open(image_stream))
             img.load()
 
-        cache.put(cache_key, img.copy())
+        # Cache the original loaded image
+        cache.put(cache_key, img)
 
-        img_to_return = img
+        # Prepare display image
         if target_size:
             resampling_method = (
                 Image.Resampling.NEAREST if performance_mode
@@ -278,9 +308,9 @@ def load_image_data_async(
             )
             img_thumb = img.copy()
             img_thumb.thumbnail(target_size, resampling_method)
-            img_to_return = img_thumb
-
-        result_queue.put(LoadResult(success=True, data=img_to_return, cache_key=cache_key))
+            result_queue.put(LoadResult(success=True, data=img_thumb, cache_key=cache_key))
+        else:
+            result_queue.put(LoadResult(success=True, data=img, cache_key=cache_key))
 
     except KeyError:
         result_queue.put(LoadResult(success=False, error_message=f"Member '{member_name}' not found", cache_key=cache_key))

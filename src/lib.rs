@@ -32,11 +32,11 @@ impl ZipScanner {
         if filename.is_empty() || filename.ends_with('/') {
             return false;
         }
-        let lower_name = filename.to_lowercase();
-        for ext in &self.image_extensions {
-            if lower_name.ends_with(ext) {
-                return true;
-            }
+        
+        // Find the last dot for extension
+        if let Some(dot_pos) = filename.rfind('.') {
+            let ext = &filename[dot_pos..].to_lowercase();
+            return self.image_extensions.contains(ext);
         }
         false
     }
@@ -44,7 +44,9 @@ impl ZipScanner {
     fn analyze_zip(
         &self,
         zip_path: &str,
+        collect_members: Option<bool>,
     ) -> PyResult<(bool, Option<Vec<String>>, Option<f64>, Option<u64>, u32)> {
+        let should_collect = collect_members.unwrap_or(true);
         let path = Path::new(zip_path);
 
         if !path.exists() {
@@ -76,12 +78,18 @@ impl ZipScanner {
             Err(_) => return Ok((false, None, mod_time, Some(file_size), 0)),
         };
 
-        let mut image_members = Vec::new();
+        let total_entries = zip.len();
+        
+        let mut image_members = if should_collect {
+            Vec::with_capacity(std::cmp::min(total_entries, 100))
+        } else {
+            Vec::new()
+        };
         let mut image_count = 0u32;
-        let mut contains_only_images = true;
         let mut has_at_least_one_file = false;
 
-        for i in 0..zip.len() {
+        // Check if all files are images (early exit on first non-image)
+        for i in 0..total_entries {
             let file = match zip.by_index(i) {
                 Ok(f) => f,
                 Err(_) => continue,
@@ -96,16 +104,17 @@ impl ZipScanner {
 
             if self.is_image_file(filename) {
                 image_count += 1;
-                image_members.push(filename.to_string());
+                if should_collect {
+                    image_members.push(filename.to_string());
+                }
             } else {
-                contains_only_images = false;
-                image_members.clear();
-                break;
+                // Found non-image file, archive is not valid
+                return Ok((false, None, mod_time, Some(file_size), image_count));
             }
         }
 
-        let is_valid = has_at_least_one_file && contains_only_images;
-        let members = if is_valid {
+        let is_valid = has_at_least_one_file && image_count > 0;
+        let members = if is_valid && should_collect {
             Some(image_members)
         } else {
             None
