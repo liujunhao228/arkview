@@ -93,7 +93,7 @@ class MainApp:
             'max_thumbnail_size': CONFIG['MAX_THUMBNAIL_LOAD_SIZE'],
         }
 
-        self.zip_files: Dict[str, Tuple[List[str], float, int]] = {}
+        self.zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]] = {}
         self.current_selected_zip: Optional[str] = None
         self.current_preview_index: Optional[int] = None
         self.current_preview_future = None
@@ -229,10 +229,19 @@ class MainApp:
                 if self.scan_stop_event.is_set():
                     break
 
-                is_valid, members, mod_time, file_size, image_count = self.zip_scanner.analyze_zip(str(zip_path))
+                is_valid, members, mod_time, file_size, image_count = self.zip_scanner.analyze_zip(
+                    str(zip_path),
+                    collect_members=False
+                )
 
-                if is_valid and members:
-                    self._add_zip_entry(str(zip_path), members, mod_time, file_size)
+                if is_valid:
+                    self._add_zip_entry(
+                        str(zip_path),
+                        members,
+                        mod_time,
+                        file_size,
+                        image_count
+                    )
 
                 if i % CONFIG["BATCH_UPDATE_INTERVAL"] == 0:
                     self.status_label.config(text=f"Scanning... {i} files processed")
@@ -269,22 +278,39 @@ class MainApp:
         zip_path: str,
         members: Optional[List[str]] = None,
         mod_time: Optional[float] = None,
-        file_size: Optional[int] = None
+        file_size: Optional[int] = None,
+        image_count: Optional[int] = None
     ):
         """Add a ZIP file to the list."""
         if zip_path in self.zip_files:
             return
 
-        if members is None:
-            is_valid, members, mod_time, file_size, _ = self.zip_scanner.analyze_zip(zip_path)
-            if not is_valid or not members:
+        resolved_members = members
+        resolved_mod_time = mod_time
+        resolved_file_size = file_size
+        resolved_image_count = image_count
+
+        if resolved_members is None and resolved_image_count is None:
+            is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
+            if not is_valid or not resolved_members:
+                return
+        elif resolved_members is None and (resolved_mod_time is None or resolved_file_size is None):
+            # Need complete metadata for display
+            is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
+            if not is_valid:
                 return
 
-        self.zip_files[zip_path] = (members, mod_time or 0, file_size or 0)
+        if resolved_image_count is None:
+            resolved_image_count = len(resolved_members) if resolved_members else 0
+
+        entry_mod_time = resolved_mod_time or 0
+        entry_file_size = resolved_file_size or 0
+
+        self.zip_files[zip_path] = (resolved_members, entry_mod_time, entry_file_size, resolved_image_count)
 
         display_text = os.path.basename(zip_path)
-        if file_size:
-            display_text += f" ({_format_size(file_size)})"
+        if entry_file_size:
+            display_text += f" ({_format_size(entry_file_size)})"
 
         self.zip_listbox.insert(tk.END, display_text)
 
@@ -302,15 +328,38 @@ class MainApp:
         zip_path = zip_entries[index]
         self.current_selected_zip = zip_path
 
-        members, mod_time, file_size = self.zip_files[zip_path]
+        entry = self.zip_files[zip_path]
+        members, mod_time, file_size, image_count = entry
 
-        self._update_details(zip_path, members, mod_time, file_size)
+        if members is None:
+            members = self._ensure_members_loaded(zip_path)
+            if not members:
+                return
+            members, mod_time, file_size, image_count = self.zip_files[zip_path]
+
+        self._update_details(zip_path, mod_time, file_size, image_count)
         self._load_preview(zip_path, members, 0)
 
-    def _update_details(self, zip_path: str, members: List[str], mod_time: float, file_size: int):
+    def _ensure_members_loaded(self, zip_path: str) -> Optional[List[str]]:
+        """Ensure members list is loaded for a ZIP file."""
+        entry = self.zip_files.get(zip_path)
+        if not entry:
+            return None
+
+        members, mod_time, file_size, image_count = entry
+        if members is not None:
+            return members
+
+        is_valid, members, mod_time, file_size, image_count = self.zip_scanner.analyze_zip(zip_path)
+        if is_valid and members:
+            self.zip_files[zip_path] = (members, mod_time or 0, file_size or 0, len(members))
+            return members
+        return None
+
+    def _update_details(self, zip_path: str, mod_time: float, file_size: int, image_count: int):
         """Update the details panel."""
         details = f"Archive: {os.path.basename(zip_path)}\n"
-        details += f"Images: {len(members)}\n"
+        details += f"Images: {image_count}\n"
         details += f"Size: {_format_size(file_size)}\n"
         if mod_time:
             details += f"Modified: {format_datetime(mod_time)}\n"
@@ -346,7 +395,7 @@ class MainApp:
             self.app_settings['performance_mode']
         )
 
-        self.root.after(50, self._check_preview_result)
+        self.root.after(20, self._check_preview_result)
 
     def _check_preview_result(self):
         """Check if preview image is ready."""
@@ -356,9 +405,12 @@ class MainApp:
                 photo = ImageTk.PhotoImage(result.data)
                 self.preview_label.config(image=photo)
                 self.preview_label.image = photo
+            else:
+                if result.error_message:
+                    self.preview_label.config(image='', text=f"Error: {result.error_message}")
         except queue.Empty:
             if self.current_preview_future and not self.current_preview_future.done():
-                self.root.after(50, self._check_preview_result)
+                self.root.after(20, self._check_preview_result)
 
     def _open_viewer(self):
         """Open the multi-image viewer."""
@@ -371,7 +423,17 @@ class MainApp:
             return
 
         zip_path = self.current_selected_zip
-        members, _, _ = self.zip_files[zip_path]
+        entry = self.zip_files.get(zip_path)
+        if not entry:
+            messagebox.showwarning("Missing Entry", "Selected archive is no longer available.")
+            return
+
+        members = entry[0]
+        if members is None:
+            members = self._ensure_members_loaded(zip_path)
+            if not members:
+                messagebox.showerror("Error", "Unable to load archive contents.")
+                return
 
         index = self.current_preview_index or 0
 
