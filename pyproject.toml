@@ -14,10 +14,7 @@ dependencies = [
     "Pillow>=9.0.0",
     "pyximport; python_version < '3.10'",
 ]
-optional-dependencies = {
-    "dnd" = ["tkinterdnd2>=0.3.0"],
-    "dev" = ["pytest>=7.0"],
-}
+optional-dependencies = {"dnd" = ["tkinterdnd2>=0.3.0"],"dev" = ["pytest>=7.0"]}
 
 [project.scripts]
 arkview = "arkview.main:main"
