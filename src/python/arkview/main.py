@@ -85,7 +85,7 @@ class MainApp:
         self.zip_scanner = ZipScanner()
         self.zip_manager = ZipFileManager()
         self.cache = LRUCache(CONFIG["CACHE_MAX_ITEMS_NORMAL"])
-        self.result_queue: queue.Queue = queue.Queue()
+        self.preview_queue: queue.Queue = queue.Queue()
         self.thread_pool = ThreadPoolExecutor(max_workers=CONFIG["THREAD_POOL_WORKERS"])
 
         self.app_settings: Dict[str, Any] = {
@@ -98,6 +98,8 @@ class MainApp:
         self.zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]] = {}
         self.current_selected_zip: Optional[str] = None
         self.current_preview_index: Optional[int] = None
+        self.current_preview_members: Optional[List[str]] = None
+        self.current_preview_cache_key: Optional[Tuple[str, str]] = None
         self.current_preview_future = None
 
         self.scan_thread = None
@@ -140,8 +142,43 @@ class MainApp:
         right_label = ttk.Label(right_frame, text="Preview", font=("", 10, "bold"))
         right_label.pack(fill=tk.X, pady=(0, 5))
 
-        self.preview_label = tk.Label(right_frame, background="lightgray", height=15)
+        # Preview navigation controls
+        preview_nav_frame = ttk.Frame(right_frame)
+        preview_nav_frame.pack(fill=tk.X, pady=(0, 5))
+
+        self.preview_prev_button = ttk.Button(
+            preview_nav_frame, text="< Prev", command=self._preview_prev, width=8
+        )
+        self.preview_prev_button.pack(side=tk.LEFT)
+        self.preview_prev_button.config(state=tk.DISABLED)
+
+        self.preview_info_label = ttk.Label(
+            preview_nav_frame, text="", anchor=tk.CENTER
+        )
+        self.preview_info_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+
+        self.preview_next_button = ttk.Button(
+            preview_nav_frame, text="Next >", command=self._preview_next, width=8
+        )
+        self.preview_next_button.pack(side=tk.RIGHT)
+        self.preview_next_button.config(state=tk.DISABLED)
+
+        self.preview_label = tk.Label(
+            right_frame,
+            background="lightgray",
+            height=15,
+            text="Select a ZIP file",
+            anchor=tk.CENTER,
+            cursor="hand2"
+        )
         self.preview_label.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        self.preview_label.bind("<Button-1>", lambda event: self._open_viewer())
+        self.preview_label.bind("<MouseWheel>", self._on_preview_scroll)
+        if platform.system() == "Linux":
+            self.preview_label.bind("<Button-4>", self._on_preview_scroll)
+            self.preview_label.bind("<Button-5>", self._on_preview_scroll)
+
+        self._reset_preview()
 
         # --- Details Panel ---
         details_frame = ttk.LabelFrame(right_frame, text="Details", padding=5)
@@ -363,11 +400,13 @@ class MainApp:
         """Handle ZIP file selection."""
         selection = self.zip_listbox.curselection()
         if not selection:
+            self._reset_preview()
             return
 
         index = selection[0]
         zip_entries = list(self.zip_files.keys())
         if index >= len(zip_entries):
+            self._reset_preview()
             return
 
         zip_path = zip_entries[index]
@@ -379,8 +418,13 @@ class MainApp:
         if members is None:
             members = self._ensure_members_loaded(zip_path)
             if not members:
+                self._reset_preview("No images found")
                 return
             members, mod_time, file_size, image_count = self.zip_files[zip_path]
+
+        if not members:
+            self._reset_preview("No images found")
+            return
 
         self._update_details(zip_path, mod_time, file_size, image_count)
         self._load_preview(zip_path, members, 0)
@@ -416,16 +460,36 @@ class MainApp:
 
     def _load_preview(self, zip_path: str, members: List[str], index: int):
         """Load preview image."""
-        if index >= len(members):
+        if not members or index >= len(members) or index < 0:
             return
 
+        if self.current_preview_future and not self.current_preview_future.done():
+            self.current_preview_future.cancel()
+        while True:
+            try:
+                self.preview_queue.get_nowait()
+            except queue.Empty:
+                break
+
         self.current_preview_index = index
+        self.current_preview_members = members
         cache_key = (zip_path, members[index])
+        self.current_preview_cache_key = cache_key
+
+        # Update preview info label
+        self.preview_info_label.config(text=f"Image {index + 1} / {len(members)}")
+
+        # Update navigation button states
+        self.preview_prev_button.config(state=tk.NORMAL if index > 0 else tk.DISABLED)
+        self.preview_next_button.config(state=tk.NORMAL if index < len(members) - 1 else tk.DISABLED)
 
         target_size = (
             CONFIG["PERFORMANCE_THUMBNAIL_SIZE"] if self.app_settings['performance_mode']
             else CONFIG["THUMBNAIL_SIZE"]
         )
+
+        self.preview_label.config(image='', text="Loading preview...")
+        self.preview_label.image = None
 
         self.current_preview_future = self.thread_pool.submit(
             load_image_data_async,
@@ -433,7 +497,7 @@ class MainApp:
             members[index],
             self.app_settings['max_thumbnail_size'],
             target_size,
-            self.result_queue,
+            self.preview_queue,
             self.cache,
             cache_key,
             self.zip_manager,
@@ -444,18 +508,76 @@ class MainApp:
 
     def _check_preview_result(self):
         """Check if preview image is ready."""
+        expected_key = getattr(self, 'current_preview_cache_key', None)
+        if expected_key is None:
+            return
+
         try:
-            result = self.result_queue.get_nowait()
-            if result.success and result.data:
-                photo = ImageTk.PhotoImage(result.data)
-                self.preview_label.config(image=photo)
-                self.preview_label.image = photo
-            else:
-                if result.error_message:
-                    self.preview_label.config(image='', text=f"Error: {result.error_message}")
+            while True:
+                result = self.preview_queue.get_nowait()
+                if result.cache_key != expected_key:
+                    continue
+
+                if result.success and result.data:
+                    photo = ImageTk.PhotoImage(result.data)
+                    self.preview_label.config(image=photo, text="")
+                    self.preview_label.image = photo
+                else:
+                    message = result.error_message or "Preview failed"
+                    self.preview_label.config(image='', text=f"Error: {message}")
+                    self.preview_label.image = None
+                self.current_preview_future = None
+                return
         except queue.Empty:
             if self.current_preview_future and not self.current_preview_future.done():
                 self.root.after(20, self._check_preview_result)
+
+    def _reset_preview(self, message: str = "Select a ZIP file"):
+        if self.current_preview_future and not self.current_preview_future.done():
+            self.current_preview_future.cancel()
+        self.current_preview_future = None
+        self.current_preview_members = None
+        self.current_preview_index = None
+        self.current_preview_cache_key = None
+
+        # Drain any pending preview results
+        while True:
+            try:
+                self.preview_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self.preview_label.config(image='', text=message)
+        self.preview_label.image = None
+        self.preview_info_label.config(text='')
+        self.preview_prev_button.config(state=tk.DISABLED)
+        self.preview_next_button.config(state=tk.DISABLED)
+
+    def _on_preview_scroll(self, event):
+        if not self.current_preview_members:
+            return
+        if platform.system() == "Linux":
+            delta = 1 if event.num == 4 else -1
+        else:
+            delta = 1 if event.delta > 0 else -1
+        if delta > 0:
+            self._preview_prev()
+        else:
+            self._preview_next()
+
+    def _preview_prev(self):
+        if not self.current_selected_zip or not self.current_preview_members:
+            return
+        new_index = (self.current_preview_index or 0) - 1
+        if new_index >= 0:
+            self._load_preview(self.current_selected_zip, self.current_preview_members, new_index)
+
+    def _preview_next(self):
+        if not self.current_selected_zip or not self.current_preview_members:
+            return
+        current_index = self.current_preview_index or 0
+        if current_index + 1 < len(self.current_preview_members):
+            self._load_preview(self.current_selected_zip, self.current_preview_members, current_index + 1)
 
     def _open_viewer(self):
         """Open the multi-image viewer."""
@@ -482,6 +604,7 @@ class MainApp:
 
         index = self.current_preview_index or 0
 
+        viewer_queue = queue.Queue()
         ImageViewerWindow(
             self.root,
             zip_path,
@@ -489,7 +612,7 @@ class MainApp:
             index,
             self.app_settings,
             self.cache,
-            self.result_queue,
+            viewer_queue,
             self.thread_pool,
             self.zip_manager
         )
@@ -510,7 +633,7 @@ class MainApp:
         self.zip_listbox.delete(0, tk.END)
         self.zip_files.clear()
         self.current_selected_zip = None
-        self.preview_label.config(image='')
+        self._reset_preview()
         self.details_text.config(state=tk.NORMAL)
         self.details_text.delete(1.0, tk.END)
         self.details_text.config(state=tk.DISABLED)
