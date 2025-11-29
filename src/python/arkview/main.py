@@ -10,8 +10,9 @@ import subprocess
 import threading
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageTk
 from tkinter import Menu, filedialog, messagebox
@@ -32,7 +33,8 @@ CONFIG: Dict[str, Any] = {
     "IMAGE_EXTENSIONS": {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'},
     "THUMBNAIL_SIZE": (280, 280),
     "PERFORMANCE_THUMBNAIL_SIZE": (180, 180),
-    "BATCH_UPDATE_INTERVAL": 5,
+    "BATCH_SCAN_SIZE": 50,  # Number of files to scan in one batch
+    "BATCH_UPDATE_INTERVAL": 20,  # UI update interval (number of files)
     "MAX_THUMBNAIL_LOAD_SIZE": 10 * 1024 * 1024,
     "PERFORMANCE_MAX_THUMBNAIL_LOAD_SIZE": 3 * 1024 * 1024,
     "MAX_VIEWER_LOAD_SIZE": 100 * 1024 * 1024,
@@ -210,6 +212,7 @@ class MainApp:
         if not directory:
             return
 
+        self.status_label.config(text="Scanning...")
         self.scan_stop_event.clear()
         self.scan_thread = threading.Thread(
             target=self._scan_directory_worker,
@@ -219,38 +222,65 @@ class MainApp:
         self.scan_thread.start()
 
     def _scan_directory_worker(self, directory: str):
-        """Worker thread for scanning a directory."""
-        self.status_label.config(text="Scanning...")
-        self.root.update()
-
+        """Worker thread for scanning a directory with batch processing."""
         try:
-            zip_files = list(Path(directory).glob("**/*.zip"))
-            for i, zip_path in enumerate(zip_files):
+            zip_files = [str(p) for p in Path(directory).glob("**/*.zip")]
+            total_files = len(zip_files)
+
+            if total_files == 0:
+                self._run_on_main_thread(self.status_label.config, text="No ZIP files found")
+                return
+
+            batch_size = max(1, CONFIG["BATCH_SCAN_SIZE"])
+            ui_update_interval = max(1, CONFIG["BATCH_UPDATE_INTERVAL"])
+            pending_entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]] = []
+            processed = 0
+            valid_found = 0
+
+            def flush_pending():
+                if not pending_entries:
+                    return
+                batch = pending_entries.copy()
+                pending_entries.clear()
+                self._run_on_main_thread(self._add_zip_entries_bulk, batch)
+
+            for start in range(0, total_files, batch_size):
                 if self.scan_stop_event.is_set():
                     break
 
-                is_valid, members, mod_time, file_size, image_count = self.zip_scanner.analyze_zip(
-                    str(zip_path),
-                    collect_members=False
-                )
+                batch_paths = zip_files[start:start + batch_size]
+                try:
+                    batch_results = self.zip_scanner.batch_analyze_zips(batch_paths, collect_members=False)
+                except Exception as e:
+                    self._run_on_main_thread(messagebox.showerror, "Error", f"Scan error: {e}")
+                    self._run_on_main_thread(self.status_label.config, text="Scan failed")
+                    return
 
-                if is_valid:
-                    self._add_zip_entry(
-                        str(zip_path),
-                        members,
-                        mod_time,
-                        file_size,
-                        image_count
+                for zip_path, is_valid, members, mod_time, file_size, image_count in batch_results:
+                    processed += 1
+                    if is_valid:
+                        pending_entries.append((zip_path, members, mod_time, file_size, image_count))
+                        valid_found += 1
+
+                if len(pending_entries) >= batch_size:
+                    flush_pending()
+
+                if processed % ui_update_interval == 0 or processed >= total_files:
+                    self._run_on_main_thread(
+                        self.status_label.config,
+                        text=f"Scanning... {processed}/{total_files} files processed"
                     )
 
-                if i % CONFIG["BATCH_UPDATE_INTERVAL"] == 0:
-                    self.status_label.config(text=f"Scanning... {i} files processed")
-                    self.root.update()
+            flush_pending()
 
-            self.status_label.config(text=f"Found {len(self.zip_files)} valid archives")
+            final_message = (
+                "Scan canceled" if self.scan_stop_event.is_set()
+                else f"Found {valid_found} valid archives (of {processed} scanned)"
+            )
+            self._run_on_main_thread(self.status_label.config, text=final_message)
         except Exception as e:
-            messagebox.showerror("Error", f"Scan error: {e}")
-            self.status_label.config(text="Scan failed")
+            self._run_on_main_thread(messagebox.showerror, "Error", f"Scan error: {e}")
+            self._run_on_main_thread(self.status_label.config, text="Scan failed")
 
     def _add_zip_file(self):
         """Add a single ZIP file."""
@@ -282,37 +312,52 @@ class MainApp:
         image_count: Optional[int] = None
     ):
         """Add a ZIP file to the list."""
-        if zip_path in self.zip_files:
+        self._add_zip_entries_bulk([(zip_path, members, mod_time, file_size, image_count)])
+
+    def _add_zip_entries_bulk(self, entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]]):
+        """Add multiple ZIP files to the list in a batch (more efficient)."""
+        if not entries:
             return
+        
+        display_items = []
+        for zip_path, members, mod_time, file_size, image_count in entries:
+            if zip_path in self.zip_files:
+                continue
+            
+            resolved_members = members
+            resolved_mod_time = mod_time
+            resolved_file_size = file_size
+            resolved_image_count = image_count
 
-        resolved_members = members
-        resolved_mod_time = mod_time
-        resolved_file_size = file_size
-        resolved_image_count = image_count
+            if resolved_members is None and resolved_image_count is None:
+                is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
+                if not is_valid or not resolved_members:
+                    continue
+            elif resolved_members is None and (resolved_mod_time is None or resolved_file_size is None):
+                # Need complete metadata for display
+                is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
+                if not is_valid:
+                    continue
 
-        if resolved_members is None and resolved_image_count is None:
-            is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
-            if not is_valid or not resolved_members:
-                return
-        elif resolved_members is None and (resolved_mod_time is None or resolved_file_size is None):
-            # Need complete metadata for display
-            is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
-            if not is_valid:
-                return
+            if resolved_image_count is None:
+                resolved_image_count = len(resolved_members) if resolved_members else 0
 
-        if resolved_image_count is None:
-            resolved_image_count = len(resolved_members) if resolved_members else 0
+            entry_mod_time = resolved_mod_time or 0
+            entry_file_size = resolved_file_size or 0
 
-        entry_mod_time = resolved_mod_time or 0
-        entry_file_size = resolved_file_size or 0
+            self.zip_files[zip_path] = (resolved_members, entry_mod_time, entry_file_size, resolved_image_count)
 
-        self.zip_files[zip_path] = (resolved_members, entry_mod_time, entry_file_size, resolved_image_count)
+            display_text = os.path.basename(zip_path)
+            if entry_file_size:
+                display_text += f" ({_format_size(entry_file_size)})"
+            display_items.append(display_text)
+        
+        if display_items:
+            self.zip_listbox.insert(tk.END, *display_items)
 
-        display_text = os.path.basename(zip_path)
-        if entry_file_size:
-            display_text += f" ({_format_size(entry_file_size)})"
-
-        self.zip_listbox.insert(tk.END, display_text)
+    def _run_on_main_thread(self, func: Callable, *args, **kwargs):
+        """Execute function on main thread (thread-safe UI update)."""
+        self.root.after(0, partial(func, *args, **kwargs))
 
     def _on_zip_selected(self, event):
         """Handle ZIP file selection."""
