@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use image::io::Reader as ImageReader;
+use image::GenericImageView;
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".ico",
@@ -133,13 +134,7 @@ impl ImageProcessor {
         max_height: u32,
         fast_mode: bool,
     ) -> PyResult<Vec<u8>> {
-        let reader = ImageReader::new(std::io::Cursor::new(image_data))
-            .with_guessed_format()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
-
-        let format = reader.format();
-        let mut img = reader
-            .decode()
+        let img = image::load_from_memory(image_data)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
         let (width, height) = img.dimensions();
@@ -151,11 +146,10 @@ impl ImageProcessor {
         let final_width = if new_width > max_width { max_width } else { new_width };
         let final_height = (final_width as f32 / aspect_ratio) as u32;
 
-        img = img.thumbnail_exact(final_width, final_height);
+        let img = img.thumbnail(final_width, final_height);
 
-        let format = format.unwrap_or(image::ImageFormat::Png);
         let mut thumb_data = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut thumb_data), format)
+        img.write_to(&mut std::io::Cursor::new(&mut thumb_data), image::ImageFormat::Png)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
         Ok(thumb_data)
@@ -184,8 +178,8 @@ impl ImageProcessor {
     }
 
     fn validate_image_format(&self, image_data: &[u8]) -> PyResult<bool> {
-        match ImageReader::new(std::io::Cursor::new(image_data)).with_guessed_format() {
-            Ok(reader) => Ok(reader.format().is_some()),
+        match image::load_from_memory(image_data) {
+            Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
     }
