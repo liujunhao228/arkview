@@ -1,13 +1,9 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::sync::Mutex;
 use image::io::Reader as ImageReader;
-use parking_lot::RwLock;
-use std::sync::Arc;
 
 const IMAGE_EXTENSIONS: &[&str] = &[
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".ico",
@@ -138,6 +134,7 @@ impl ImageProcessor {
         fast_mode: bool,
     ) -> PyResult<Vec<u8>> {
         let reader = ImageReader::new(std::io::Cursor::new(image_data))
+            .with_guessed_format()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
         let format = reader.format();
@@ -187,11 +184,8 @@ impl ImageProcessor {
     }
 
     fn validate_image_format(&self, image_data: &[u8]) -> PyResult<bool> {
-        match ImageReader::new(std::io::Cursor::new(image_data)) {
-            Ok(reader) => match reader.format() {
-                Some(_) => Ok(true),
-                None => Ok(false),
-            },
+        match ImageReader::new(std::io::Cursor::new(image_data)).with_guessed_format() {
+            Ok(reader) => Ok(reader.format().is_some()),
             Err(_) => Ok(false),
         }
     }
