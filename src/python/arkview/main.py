@@ -26,12 +26,15 @@ from .core import (
 from .ui import (
     SettingsDialog, ImageViewerWindow, DND_ENABLED, TkinterDnD, DND_FILES, format_datetime
 )
+from .gallery import GalleryView
 
 
 CONFIG: Dict[str, Any] = {
     "IMAGE_EXTENSIONS": {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'},
     "THUMBNAIL_SIZE": (280, 280),
     "PERFORMANCE_THUMBNAIL_SIZE": (180, 180),
+    "GALLERY_THUMB_SIZE": (220, 220),
+    "GALLERY_PREVIEW_SIZE": (480, 480),
     "BATCH_SCAN_SIZE": 50,  # Number of files to scan in one batch
     "BATCH_UPDATE_INTERVAL": 20,  # UI update interval (number of files)
     "MAX_THUMBNAIL_LOAD_SIZE": 10 * 1024 * 1024,
@@ -104,9 +107,13 @@ class MainApp:
         self.scan_thread = None
         self.scan_stop_event = threading.Event()
 
+        self.current_view = "explorer"  # "explorer" or "gallery"
+        self.gallery_widget: Optional[GalleryView] = None
+
         self._setup_ui()
         self._setup_menu()
         self._setup_drag_drop()
+        self._setup_keyboard_shortcuts()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
 
@@ -115,7 +122,39 @@ class MainApp:
 
     def _setup_ui(self):
         """Setup the main UI."""
-        main_frame = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        # View switcher at the top
+        view_switch_frame = ttk.Frame(self.root, padding=(8, 5))
+        view_switch_frame.pack(fill=tk.X, side=tk.TOP)
+
+        view_label = ttk.Label(view_switch_frame, text="View:", font=("", 10, "bold"))
+        view_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.explorer_view_button = ttk.Button(
+            view_switch_frame,
+            text="📋 Resource Explorer",
+            command=lambda: self._switch_view("explorer"),
+            bootstyle="primary",
+            width=18
+        )
+        self.explorer_view_button.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.gallery_view_button = ttk.Button(
+            view_switch_frame,
+            text="🎞️ Gallery",
+            command=lambda: self._switch_view("gallery"),
+            bootstyle="secondary-outline",
+            width=15
+        )
+        self.gallery_view_button.pack(side=tk.LEFT)
+
+        # Container for switchable views
+        self.views_container = ttk.Frame(self.root)
+        self.views_container.pack(fill=tk.BOTH, expand=True)
+
+        # === RESOURCE EXPLORER VIEW ===
+        self.explorer_view_frame = ttk.Frame(self.views_container)
+        
+        main_frame = ttk.PanedWindow(self.explorer_view_frame, orient=tk.HORIZONTAL)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         # --- Left Panel: ZIP File List ---
@@ -215,6 +254,22 @@ class MainApp:
         )
         self.details_text.pack(fill=tk.BOTH, expand=True)
 
+        # === GALLERY VIEW ===
+        self.gallery_view_frame = ttk.Frame(self.views_container)
+        self.gallery_widget = GalleryView(
+            self.gallery_view_frame,
+            self.zip_files,
+            self.app_settings,
+            self.cache,
+            self.thread_pool,
+            self.zip_manager,
+            CONFIG,
+            self._ensure_members_loaded,
+            self._on_gallery_selection,
+            self._open_viewer_from_gallery
+        )
+        self.gallery_widget.pack(fill=tk.BOTH, expand=True)
+
         # --- Bottom Control Panel ---
         bottom_frame = ttk.Frame(self.root, padding=(8, 5))
         bottom_frame.pack(fill=tk.X, side=tk.BOTTOM)
@@ -269,6 +324,9 @@ class MainApp:
         )
         self.status_label.pack(side=tk.RIGHT, padx=(5, 0))
 
+        self._update_view_buttons()
+        self._update_view_visibility()
+
     def _setup_menu(self):
         """Setup the menu bar."""
         menubar = Menu(self.root)
@@ -303,6 +361,78 @@ class MainApp:
             file_path = file_path.strip('{}')
             if file_path.lower().endswith('.zip'):
                 self._add_zip_entry(file_path)
+
+    def _setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts."""
+        self.root.bind("<Control-g>", lambda e: self._switch_view("gallery"))
+        self.root.bind("<Control-e>", lambda e: self._switch_view("explorer"))
+        self.root.bind("<Tab>", self._handle_tab_switch)
+        
+        # Gallery navigation keys
+        self.root.bind("<Left>", self._handle_gallery_key)
+        self.root.bind("<Right>", self._handle_gallery_key)
+        self.root.bind("<Up>", self._handle_gallery_key)
+        self.root.bind("<Down>", self._handle_gallery_key)
+        self.root.bind("<space>", self._handle_gallery_key)
+        self.root.bind("<Return>", self._handle_gallery_key)
+        self.root.bind("<Escape>", self._handle_gallery_key)
+        self.root.bind("<Home>", self._handle_gallery_key)
+        self.root.bind("<End>", self._handle_gallery_key)
+
+
+    def _handle_tab_switch(self, event):
+        """Handle Tab key to switch views."""
+        if self.current_view == "explorer":
+            self._switch_view("gallery")
+        else:
+            self._switch_view("explorer")
+        return "break"
+
+    def _switch_view(self, view: str):
+        """Switch between explorer and gallery views."""
+        if view not in ["explorer", "gallery"]:
+            return
+
+        if self.current_view == view:
+            return
+
+        self.current_view = view
+        self._update_view_buttons()
+        self._update_view_visibility()
+
+        if view == "gallery" and self.gallery_widget:
+            self.gallery_widget.populate()
+
+    def _update_view_buttons(self):
+        """Update view button styles based on current view."""
+        if self.current_view == "explorer":
+            self.explorer_view_button.config(bootstyle="primary")
+            self.gallery_view_button.config(bootstyle="secondary-outline")
+        else:
+            self.explorer_view_button.config(bootstyle="secondary-outline")
+            self.gallery_view_button.config(bootstyle="primary")
+
+    def _update_view_visibility(self):
+        """Update view visibility based on current view."""
+        if self.current_view == "explorer":
+            self.gallery_view_frame.pack_forget()
+            self.explorer_view_frame.pack(fill=tk.BOTH, expand=True)
+        else:
+            self.explorer_view_frame.pack_forget()
+            self.gallery_view_frame.pack(fill=tk.BOTH, expand=True)
+
+    def _refresh_gallery(self):
+        """Refresh gallery view if visible."""
+        if self.gallery_widget and self.current_view == "gallery":
+            self.gallery_widget.populate()
+
+    def _handle_gallery_key(self, event):
+        """Forward navigation keys to gallery when active."""
+        if self.current_view != "gallery" or not self.gallery_widget:
+            return
+        result = self.gallery_widget.handle_keypress(event)
+        if result == "break":
+            return "break"
 
     def _scan_directory(self):
         """Scan a directory for ZIP files."""
@@ -452,6 +582,8 @@ class MainApp:
         
         if display_items:
             self.zip_listbox.insert(tk.END, *display_items)
+
+        self._refresh_gallery()
 
     def _run_on_main_thread(self, func: Callable, *args, **kwargs):
         """Execute function on main thread (thread-safe UI update)."""
@@ -677,6 +809,36 @@ class MainApp:
             self.thread_pool,
             self.zip_manager
         )
+
+    def _open_viewer_from_gallery(self, zip_path: str, members: List[str], index: int):
+        """Open viewer when triggered from gallery view."""
+        if not self.app_settings.get('viewer_enabled', True):
+            messagebox.showinfo("Disabled", "Multi-image viewer is disabled in settings.")
+            return
+        
+        viewer_queue = queue.Queue()
+        ImageViewerWindow(
+            self.root,
+            zip_path,
+            members,
+            index,
+            self.app_settings,
+            self.cache,
+            viewer_queue,
+            self.thread_pool,
+            self.zip_manager
+        )
+
+    def _on_gallery_selection(self, zip_path: str, members: List[str], index: int):
+        """Handle selection change in gallery view."""
+        self.current_selected_zip = zip_path
+        self.current_preview_members = members
+        self.current_preview_index = index
+
+        entry = self.zip_files.get(zip_path)
+        if entry:
+            _, mod_time, file_size, image_count = entry
+            self._update_details(zip_path, mod_time, file_size, image_count)
 
     def _show_settings(self):
         """Show settings dialog."""
