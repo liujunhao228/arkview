@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
-use image::ImageReader;
+use image::io::Reader as ImageReader;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
