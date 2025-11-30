@@ -1,5 +1,5 @@
 """
-Gallery View for Arkview - mobile-like browsing with keyboard shortcuts.
+Gallery View for Arkview - mobile-like browsing with enhanced UX.
 """
 
 import os
@@ -10,13 +10,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import ImageTk
-import ttkbootstrap as ttk
+from ttkbootstrap import ttk
 
 from .core import ZipFileManager, LRUCache, load_image_data_async, _format_size
 
 
 class GalleryView(ttk.Frame):
-    """Gallery view component with thumbnail grid and image preview."""
+    """Gallery view component with mobile-like UX and modern design."""
     
     def __init__(
         self,
@@ -44,6 +44,7 @@ class GalleryView(ttk.Frame):
         self.open_viewer_callback = open_viewer_callback
         
         self.gallery_columns = 3
+        self.min_card_width = 200
         self.gallery_thumbnails: Dict[str, ImageTk.PhotoImage] = {}
         self.gallery_cards: Dict[str, tk.Frame] = {}
         self.gallery_thumb_labels: Dict[str, tk.Label] = {}
@@ -59,29 +60,49 @@ class GalleryView(ttk.Frame):
         self.gallery_preview_future = None
         self.gallery_preview_cache_key: Optional[Tuple[str, str]] = None
         self._gallery_swipe_start_x: Optional[int] = None
+        self._gallery_swipe_start_y: Optional[int] = None
         
         self._setup_ui()
     
     def _setup_ui(self):
-        """Setup the gallery UI."""
-        gallery_main = ttk.Panedwindow(self, orient=tk.VERTICAL)
-        gallery_main.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        """Setup the gallery UI with mobile-like design."""
+        gallery_main = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        gallery_main.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
         
         top_frame = ttk.Frame(gallery_main)
-        gallery_main.add(top_frame, weight=3)
+        gallery_main.add(top_frame, weight=2)
         
-        grid_label = ttk.Label(top_frame, text="🎞️ Gallery View", font=("", 11, "bold"))
-        grid_label.pack(fill=tk.X, pady=(0, 8))
+        header_frame = ttk.Frame(top_frame)
+        header_frame.pack(fill=tk.X, padx=12, pady=(8, 8))
+        
+        grid_label = ttk.Label(
+            header_frame, 
+            text="🎞️ Gallery", 
+            font=("Segoe UI", 13, "bold")
+        )
+        grid_label.pack(side=tk.LEFT)
+        
+        self.gallery_count_label = ttk.Label(
+            header_frame,
+            text="",
+            font=("Segoe UI", 9),
+            foreground="#888888"
+        )
+        self.gallery_count_label.pack(side=tk.LEFT, padx=(10, 0))
         
         canvas_frame = ttk.Frame(top_frame)
-        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=8)
         
         self.gallery_canvas = tk.Canvas(
             canvas_frame,
-            bg="#1f2123",
+            bg="#1a1d1e",
             highlightthickness=0
         )
-        gallery_scrollbar = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.gallery_canvas.yview)
+        gallery_scrollbar = ttk.Scrollbar(
+            canvas_frame, 
+            orient=tk.VERTICAL, 
+            command=self.gallery_canvas.yview
+        )
         self.gallery_canvas.config(yscrollcommand=gallery_scrollbar.set)
         
         gallery_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -96,15 +117,15 @@ class GalleryView(ttk.Frame):
         self.gallery_canvas.bind("<Configure>", self._on_gallery_canvas_configure)
         
         bottom_frame = ttk.Frame(gallery_main)
-        gallery_main.add(bottom_frame, weight=2)
+        gallery_main.add(bottom_frame, weight=3)
         
         preview_header = ttk.Frame(bottom_frame)
-        preview_header.pack(fill=tk.X, pady=(8, 8))
+        preview_header.pack(fill=tk.X, padx=12, pady=(12, 8))
         
         self.gallery_preview_label = ttk.Label(
             preview_header, 
-            text="Select an archive to preview", 
-            font=("", 10, "bold")
+            text="Tap an album to preview", 
+            font=("Segoe UI", 11, "bold")
         )
         self.gallery_preview_label.pack(side=tk.LEFT)
         
@@ -113,57 +134,68 @@ class GalleryView(ttk.Frame):
         
         self.gallery_prev_btn = ttk.Button(
             nav_frame,
-            text="◀",
+            text="❮",
             command=self._gallery_prev_image,
-            width=3,
-            bootstyle="secondary-outline"
+            width=4,
+            bootstyle="secondary"
         )
-        self.gallery_prev_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.gallery_prev_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.gallery_prev_btn.config(state=tk.DISABLED)
         
-        self.gallery_img_info = ttk.Label(nav_frame, text="", font=("", 9))
-        self.gallery_img_info.pack(side=tk.LEFT, padx=10)
+        self.gallery_img_info = ttk.Label(
+            nav_frame, 
+            text="", 
+            font=("Segoe UI", 10),
+            foreground="#ffffff"
+        )
+        self.gallery_img_info.pack(side=tk.LEFT, padx=8)
         
         self.gallery_next_btn = ttk.Button(
             nav_frame,
-            text="▶",
+            text="❯",
             command=self._gallery_next_image,
-            width=3,
-            bootstyle="secondary-outline"
+            width=4,
+            bootstyle="secondary"
         )
-        self.gallery_next_btn.pack(side=tk.LEFT, padx=(5, 0))
+        self.gallery_next_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.gallery_next_btn.config(state=tk.DISABLED)
         
-        preview_container = ttk.Frame(bottom_frame, relief=tk.FLAT, borderwidth=1)
-        preview_container.pack(fill=tk.BOTH, expand=True)
+        preview_container = ttk.Frame(bottom_frame)
+        preview_container.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
         
         self.gallery_preview_img = tk.Label(
             preview_container,
-            background="#2a2d2e",
+            background="#1a1d1e",
             text="",
             anchor=tk.CENTER,
             cursor="hand2",
-            fg="#ffffff",
-            font=("", 10)
+            fg="#888888",
+            font=("Segoe UI", 11)
         )
-        self.gallery_preview_img.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        self.gallery_preview_img.pack(fill=tk.BOTH, expand=True)
         
+        self.gallery_preview_img.bind("<Double-Button-1>", lambda e: self._open_viewer_from_preview())
+        self.gallery_preview_img.bind("<Button-1>", self._gallery_swipe_start)
+        self.gallery_preview_img.bind("<B1-Motion>", self._gallery_swipe_motion)
+        self.gallery_preview_img.bind("<ButtonRelease-1>", self._gallery_swipe_end)
         self.gallery_preview_img.bind("<MouseWheel>", self._gallery_on_scroll)
         if platform.system() == "Linux":
             self.gallery_preview_img.bind("<Button-4>", self._gallery_on_scroll)
             self.gallery_preview_img.bind("<Button-5>", self._gallery_on_scroll)
-        
-        self.gallery_preview_img.bind("<ButtonPress-1>", self._gallery_swipe_start)
-        self.gallery_preview_img.bind("<ButtonRelease-1>", self._gallery_swipe_end)
     
     def _on_gallery_frame_configure(self, event=None):
         """Update scroll region when gallery frame changes."""
         self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
     
     def _on_gallery_canvas_configure(self, event):
-        """Adjust inner frame width when canvas is resized."""
+        """Adjust inner frame width and responsive columns when canvas is resized."""
         canvas_width = event.width
         self.gallery_canvas.itemconfig(self.gallery_canvas_window, width=canvas_width)
+        
+        new_columns = max(1, min(5, canvas_width // self.min_card_width))
+        if new_columns != self.gallery_columns:
+            self.gallery_columns = new_columns
+            self._reflow_gallery_cards()
     
     def populate(self):
         """Populate gallery with thumbnails of ZIP files."""
@@ -178,13 +210,17 @@ class GalleryView(ttk.Frame):
         if not zip_paths:
             empty_label = ttk.Label(
                 self.gallery_inner_frame,
-                text="No archives yet.\nUse 'Scan Directory' to add ZIP files.",
-                font=("", 11),
-                justify=tk.CENTER
+                text="No albums yet\n\nUse 'Scan Directory' to add archives",
+                font=("Segoe UI", 12),
+                justify=tk.CENTER,
+                foreground="#666666"
             )
-            empty_label.grid(row=0, column=0, padx=20, pady=40)
+            empty_label.grid(row=0, column=0, padx=20, pady=80)
             self._reset_gallery_preview()
+            self.gallery_count_label.config(text="")
             return
+        
+        self.gallery_count_label.config(text=f"{len(zip_paths)} albums")
         
         for idx, zip_path in enumerate(zip_paths):
             self._create_gallery_card(zip_path, idx)
@@ -192,69 +228,93 @@ class GalleryView(ttk.Frame):
         self._reflow_gallery_cards()
     
     def _reflow_gallery_cards(self):
-        """Arrange gallery cards in grid layout."""
+        """Arrange gallery cards in responsive grid layout."""
         zip_paths = list(self.gallery_cards.keys())
         for idx, zip_path in enumerate(zip_paths):
             row = idx // self.gallery_columns
             col = idx % self.gallery_columns
-            self.gallery_cards[zip_path].grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
+            self.gallery_cards[zip_path].grid(
+                row=row, 
+                column=col, 
+                padx=8, 
+                pady=8, 
+                sticky="nsew"
+            )
         
         for col in range(self.gallery_columns):
-            self.gallery_inner_frame.grid_columnconfigure(col, weight=1)
+            self.gallery_inner_frame.grid_columnconfigure(col, weight=1, uniform="card")
         
         self._schedule_gallery_thumbnail_poll()
     
     def _create_gallery_card(self, zip_path: str, index: int):
-        """Create a gallery card for a ZIP file."""
-        card = tk.Frame(
+        """Create a modern gallery card with mobile-like styling."""
+        card_container = tk.Frame(
             self.gallery_inner_frame,
-            bg="#2a2d2e",
-            bd=2,
+            bg="#1a1d1e",
+            highlightthickness=0
+        )
+        
+        card = tk.Frame(
+            card_container,
+            bg="#252829",
+            bd=0,
             relief=tk.FLAT,
             cursor="hand2",
-            highlightthickness=1,
-            highlightbackground="#3a3d40"
+            highlightthickness=0
         )
-        self.gallery_cards[zip_path] = card
+        card.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        
+        self.gallery_cards[zip_path] = card_container
+        
+        thumb_container = tk.Frame(card, bg="#1f2224", highlightthickness=0)
+        thumb_container.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
         
         thumb_label = tk.Label(
-            card,
-            text="Loading cover...",
-            bg="#2a2d2e",
-            fg="#f8f9fa",
-            wraplength=200,
+            thumb_container,
+            text="⏳",
+            bg="#1f2224",
+            fg="#555555",
+            wraplength=220,
             justify=tk.CENTER,
-            width=24,
-            height=10
+            font=("Segoe UI", 32),
+            width=20,
+            height=8
         )
-        thumb_label.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        thumb_label.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
         self.gallery_thumb_labels[zip_path] = thumb_label
         
+        info_frame = tk.Frame(card, bg="#252829", highlightthickness=0)
+        info_frame.pack(fill=tk.X, padx=12, pady=8)
+        
         title_label = tk.Label(
-            card,
+            info_frame,
             text=os.path.basename(zip_path),
-            bg="#2a2d2e",
-            fg="#f8f9fa",
-            wraplength=200,
-            justify=tk.CENTER,
-            font=("Segoe UI", 10, "bold")
+            bg="#252829",
+            fg="#ffffff",
+            wraplength=220,
+            justify=tk.LEFT,
+            font=("Segoe UI", 10, "bold"),
+            anchor=tk.W
         )
-        title_label.pack(fill=tk.X, padx=6, pady=(0, 4))
+        title_label.pack(fill=tk.X, pady=(0, 4))
         self.gallery_title_labels[zip_path] = title_label
         
         meta_label = tk.Label(
-            card,
+            info_frame,
             text=self._format_gallery_meta(self.zip_files.get(zip_path)),
-            bg="#2a2d2e",
-            fg="#b0b4b8",
-            wraplength=200,
-            justify=tk.CENTER,
-            font=("Segoe UI", 9)
+            bg="#252829",
+            fg="#888888",
+            wraplength=220,
+            justify=tk.LEFT,
+            font=("Segoe UI", 9),
+            anchor=tk.W
         )
-        meta_label.pack(fill=tk.X, padx=6, pady=(0, 6))
+        meta_label.pack(fill=tk.X)
         
-        for widget in (card, thumb_label, title_label, meta_label):
+        for widget in (card_container, card, thumb_container, thumb_label, info_frame, title_label, meta_label):
             widget.bind("<Button-1>", lambda e, path=zip_path: self._on_gallery_card_click(path))
+            widget.bind("<Enter>", lambda e, c=card: self._on_card_hover(c, True))
+            widget.bind("<Leave>", lambda e, c=card: self._on_card_hover(c, False))
         
         entry = self.zip_files.get(zip_path)
         members = entry[0] if entry else None
@@ -264,12 +324,23 @@ class GalleryView(ttk.Frame):
         if members:
             existing_thumb = self.gallery_thumbnails.get(zip_path)
             if existing_thumb:
-                thumb_label.config(image=existing_thumb, text="")
+                thumb_label.config(image=existing_thumb, text="", bg="#1f2224")
                 thumb_label.image = existing_thumb
             else:
                 self._request_gallery_thumbnail(zip_path, members[0])
         else:
-            thumb_label.config(text="No images found", fg="#ffb347")
+            thumb_label.config(
+                text="📭",
+                font=("Segoe UI", 28),
+                fg="#ff8866"
+            )
+    
+    def _on_card_hover(self, card: tk.Frame, is_entering: bool):
+        """Handle card hover effect."""
+        if is_entering:
+            card.config(bg="#2d3031")
+        else:
+            card.config(bg="#252829")
     
     def _format_gallery_meta(self, entry) -> str:
         """Format metadata display for gallery card."""
@@ -277,10 +348,10 @@ class GalleryView(ttk.Frame):
             return ""
         _, _, file_size, image_count = entry
         size_str = _format_size(file_size) if file_size else "?"
-        return f"📷 {image_count} • 📦 {size_str}"
+        return f"🖼 {image_count} images  •  {size_str}"
     
     def _on_gallery_card_click(self, zip_path: str):
-        """Handle gallery card click event."""
+        """Handle gallery card click event with visual feedback."""
         self.gallery_selected_zip = zip_path
         self._update_gallery_selection_styles()
         
@@ -297,25 +368,32 @@ class GalleryView(ttk.Frame):
             self.gallery_preview_label.config(text="No images found")
             self.gallery_prev_btn.config(state=tk.DISABLED)
             self.gallery_next_btn.config(state=tk.DISABLED)
+            self.gallery_preview_img.config(image='', text="This album is empty")
             return
         
         self.gallery_current_members = members
         basename = os.path.basename(zip_path)
-        self.gallery_preview_label.config(text=f"📦 {basename}")
+        self.gallery_preview_label.config(text=basename)
         
         self._gallery_load_preview_image(0)
     
     def _update_gallery_selection_styles(self):
-        """Update card styles based on current selection."""
-        for path, card in self.gallery_cards.items():
+        """Update card styles with modern selection indicator."""
+        for path, card_container in self.gallery_cards.items():
+            card = card_container.winfo_children()[0] if card_container.winfo_children() else None
+            if not card:
+                continue
+                
             if path == self.gallery_selected_zip:
-                card.config(highlightbackground="#00bc8c", highlightthickness=3, bd=2)
+                card_container.config(bg="#00bc8c")
+                card.config(highlightthickness=0)
             else:
-                card.config(highlightbackground="#3a3d40", highlightthickness=1, bd=2)
+                card_container.config(bg="#1a1d1e")
+                card.config(highlightthickness=0)
     
     def _reset_gallery_preview(self):
         """Reset gallery preview area."""
-        self.gallery_preview_label.config(text="Select an archive to preview")
+        self.gallery_preview_label.config(text="Tap an album to preview")
         self.gallery_preview_img.config(image='', text="")
         self.gallery_preview_img.image = None
         self.gallery_img_info.config(text="")
@@ -368,11 +446,16 @@ class GalleryView(ttk.Frame):
                 if result.success and result.data:
                     photo = ImageTk.PhotoImage(result.data)
                     self.gallery_thumbnails[zip_path] = photo
-                    label.config(image=photo, text="")
+                    label.config(image=photo, text="", bg="#1f2224")
                     label.image = photo
                 else:
-                    message = result.error_message or "Failed to load"
-                    label.config(text=message, fg="#ff7b72", image="")
+                    message = result.error_message or "Failed"
+                    label.config(
+                        text="⚠️",
+                        font=("Segoe UI", 28),
+                        fg="#ff7b72",
+                        image=""
+                    )
                     label.image = None
         except queue.Empty:
             pass
@@ -419,7 +502,7 @@ class GalleryView(ttk.Frame):
         cache_key = (self.gallery_selected_zip, self.gallery_current_members[index])
         self.gallery_preview_cache_key = cache_key
         
-        self.gallery_preview_img.config(image='', text="Loading...")
+        self.gallery_preview_img.config(image='', text="⏳ Loading...")
         self.gallery_preview_img.image = None
         
         self.gallery_preview_future = self.thread_pool.submit(
@@ -456,7 +539,11 @@ class GalleryView(ttk.Frame):
                     self.gallery_preview_img.image = photo
                 else:
                     message = result.error_message or "Preview failed"
-                    self.gallery_preview_img.config(image='', text=f"Error: {message}")
+                    self.gallery_preview_img.config(
+                        image='', 
+                        text=f"⚠️ {message}",
+                        font=("Segoe UI", 10)
+                    )
                     self.gallery_preview_img.image = None
                 
                 self.gallery_preview_future = None
@@ -491,24 +578,42 @@ class GalleryView(ttk.Frame):
             self._gallery_next_image()
     
     def _gallery_swipe_start(self, event):
-        """Record swipe start position."""
+        """Record swipe start position for both horizontal and vertical."""
         self._gallery_swipe_start_x = event.x
+        self._gallery_swipe_start_y = event.y
+    
+    def _gallery_swipe_motion(self, event):
+        """Handle swipe motion (for visual feedback if needed)."""
+        pass
     
     def _gallery_swipe_end(self, event):
-        """Handle swipe gesture."""
-        if self._gallery_swipe_start_x is None:
+        """Handle swipe gesture with improved detection."""
+        if self._gallery_swipe_start_x is None or self._gallery_swipe_start_y is None:
             return
         
         delta_x = event.x - self._gallery_swipe_start_x
+        delta_y = event.y - self._gallery_swipe_start_y
         threshold = 50
         
-        if abs(delta_x) > threshold:
+        if abs(delta_x) > abs(delta_y) and abs(delta_x) > threshold:
             if delta_x > 0:
                 self._gallery_prev_image()
             else:
                 self._gallery_next_image()
+        elif abs(delta_x) < 10 and abs(delta_y) < 10:
+            self._open_viewer_from_preview()
         
         self._gallery_swipe_start_x = None
+        self._gallery_swipe_start_y = None
+    
+    def _open_viewer_from_preview(self):
+        """Open viewer when preview is clicked."""
+        if self.gallery_selected_zip and self.gallery_current_members and self.open_viewer_callback:
+            self.open_viewer_callback(
+                self.gallery_selected_zip,
+                self.gallery_current_members,
+                self.gallery_image_index
+            )
     
     def handle_keypress(self, event):
         """Handle keyboard navigation in gallery view."""
@@ -526,12 +631,7 @@ class GalleryView(ttk.Frame):
                 self._gallery_load_preview_image(len(self.gallery_current_members) - 1)
             return "break"
         elif event.keysym == "Return":
-            if self.gallery_selected_zip and self.gallery_current_members and self.open_viewer_callback:
-                self.open_viewer_callback(
-                    self.gallery_selected_zip,
-                    self.gallery_current_members,
-                    self.gallery_image_index
-                )
+            self._open_viewer_from_preview()
             return "break"
         elif event.keysym == "Escape":
             self._reset_gallery_preview()
