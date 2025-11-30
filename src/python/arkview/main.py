@@ -17,7 +17,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from PIL import Image, ImageTk
 from tkinter import filedialog, messagebox, Menu
 from tkinter.scrolledtext import ScrolledText
-from ttkbootstrap import ttk, Style
+import ttkbootstrap as ttk
+from ttkbootstrap import Style
 
 from .core import (
     ZipScanner, ZipFileManager, LRUCache, load_image_data_async,
@@ -154,7 +155,7 @@ class MainApp:
         # === RESOURCE EXPLORER VIEW ===
         self.explorer_view_frame = ttk.Frame(self.views_container)
         
-        main_frame = ttk.PanedWindow(self.explorer_view_frame, orient=tk.HORIZONTAL)
+        main_frame = ttk.Panedwindow(self.explorer_view_frame, orient=tk.HORIZONTAL)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         # --- Left Panel: ZIP File List ---
@@ -246,7 +247,7 @@ class MainApp:
         self._reset_preview()
 
         # --- Details Panel ---
-        details_frame = ttk.LabelFrame(right_frame, text="ℹ️  Details", padding=8)
+        details_frame = ttk.Labelframe(right_frame, text="ℹ️  Details", padding=8)
         details_frame.pack(fill=tk.X)
 
         self.details_text = ScrolledText(
@@ -885,11 +886,11 @@ def main():
     """Main entry point."""
     if DND_ENABLED:
         root = TkinterDnD.Tk()
+        style = Style(theme="darkly", master=root)
+        style.configure('.', font=("Segoe UI", 10))
     else:
-        root = tk.Tk()
-    
-    style = Style(theme="darkly", master=root)
-    style.configure('.', font=("Segoe UI", 10))
+        root = ttk.Window(themename="darkly")
+        root.style.configure('.', font=("Segoe UI", 10))
 
     app = MainApp(root)
     root.mainloop()

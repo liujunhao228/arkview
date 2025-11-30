@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageTk
 from tkinter import BooleanVar, Menu, Toplevel, filedialog, messagebox
-from ttkbootstrap import ttk
+import ttkbootstrap as ttk
 
 from .core import (
     ZipScanner, ZipFileManager, LRUCache, load_image_data_async,
