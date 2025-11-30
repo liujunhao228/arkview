@@ -62,6 +62,10 @@ class GalleryView(ttk.Frame):
         self._gallery_swipe_start_x: Optional[int] = None
         self._gallery_swipe_start_y: Optional[int] = None
         
+        # 用于优化滚动的变量
+        self._visible_items_range = (0, 0)
+        self._last_canvas_y = 0
+        
         self._setup_ui()
     
     def _setup_ui(self):
@@ -115,6 +119,15 @@ class GalleryView(ttk.Frame):
         
         self.gallery_inner_frame.bind("<Configure>", self._on_gallery_frame_configure)
         self.gallery_canvas.bind("<Configure>", self._on_gallery_canvas_configure)
+        
+        # 添加鼠标滚轮支持
+        self.gallery_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        if platform.system() == "Linux":
+            self.gallery_canvas.bind("<Button-4>", self._on_mousewheel)
+            self.gallery_canvas.bind("<Button-5>", self._on_mousewheel)
+        
+        # 绑定滚动事件以优化渲染
+        self.gallery_canvas.bind("<Button-1>", self._on_canvas_click, "+")
         
         bottom_frame = ttk.Frame(gallery_main)
         gallery_main.add(bottom_frame, weight=3)
@@ -183,9 +196,51 @@ class GalleryView(ttk.Frame):
             self.gallery_preview_img.bind("<Button-4>", self._gallery_on_scroll)
             self.gallery_preview_img.bind("<Button-5>", self._gallery_on_scroll)
     
+    def _on_canvas_click(self, event):
+        """处理画布点击事件"""
+        # 当用户点击画布时，确保更新可见区域
+        self.after(100, self._update_visible_region)
+    
+    def _update_visible_region(self):
+        """更新可见区域信息"""
+        # 获取当前视口的边界
+        canvas_height = self.gallery_canvas.winfo_height()
+        if canvas_height <= 1:  # 窗口可能还未完全初始化
+            return
+            
+        # 获取当前滚动位置
+        scroll_top = self.gallery_canvas.canvasy(0)
+        scroll_bottom = scroll_top + canvas_height
+        
+        self._last_canvas_y = scroll_top
+        
+        # 这里可以添加虚拟化逻辑，但现在我们只记录可见区域范围
+        self._visible_items_range = (int(scroll_top), int(scroll_bottom))
+    
+    def _on_mousewheel(self, event):
+        """处理鼠标滚轮事件以滚动画廊"""
+        if platform.system() == "Linux":
+            if event.num == 4:
+                self.gallery_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.gallery_canvas.yview_scroll(1, "units")
+        else:
+            self.gallery_canvas.yview_scroll(int(-1*(event.delta/100)), "units")
+            
+        # 滚动后更新可见区域
+        self.after(50, self._update_visible_region)
+    
     def _on_gallery_frame_configure(self, event=None):
         """Update scroll region when gallery frame changes."""
-        self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
+        # 使用update_idletasks确保布局完成后再计算边界框
+        self.gallery_canvas.update_idletasks()
+        bbox = self.gallery_canvas.bbox("all")
+        if bbox:
+            self.gallery_canvas.configure(scrollregion=bbox)
+        
+        # 确保内部框架的宽度与画布可视区域一致
+        canvas_width = self.gallery_canvas.winfo_width()
+        self.gallery_canvas.itemconfig(self.gallery_canvas_window, width=canvas_width)
     
     def _on_gallery_canvas_configure(self, event):
         """Adjust inner frame width and responsive columns when canvas is resized."""
@@ -196,15 +251,32 @@ class GalleryView(ttk.Frame):
         if new_columns != self.gallery_columns:
             self.gallery_columns = new_columns
             self._reflow_gallery_cards()
+        else:
+            # 即使列数未变，也要确保更新滚动区域
+            self._update_canvas_scrollregion()
+    
+    def _update_canvas_scrollregion(self):
+        """更新画布滚动区域以匹配内容"""
+        self.gallery_canvas.update_idletasks()
+        bbox = self.gallery_canvas.bbox("all")
+        if bbox:
+            # 添加一些额外的边距以避免底部被截断
+            extended_bbox = (bbox[0], bbox[1], bbox[2], bbox[3] + 20)
+            self.gallery_canvas.configure(scrollregion=extended_bbox)
     
     def populate(self):
         """Populate gallery with thumbnails of ZIP files."""
+        # 清除现有内容
         for child in self.gallery_inner_frame.winfo_children():
             child.destroy()
         
+        # 清除引用以帮助垃圾回收
         self.gallery_cards.clear()
         self.gallery_thumb_labels.clear()
         self.gallery_title_labels.clear()
+        
+        # 清理不再需要的缩略图以释放内存
+        self._cleanup_unused_thumbnails()
         
         zip_paths = list(self.zip_files.keys())
         if not zip_paths:
@@ -226,6 +298,32 @@ class GalleryView(ttk.Frame):
             self._create_gallery_card(zip_path, idx)
         
         self._reflow_gallery_cards()
+        
+        # 重置滚动位置
+        self.gallery_canvas.yview_moveto(0)
+    
+    def _cleanup_unused_thumbnails(self):
+        """清理未使用的缩略图以释放内存"""
+        # 获取当前所有ZIP路径的集合
+        current_zip_paths = set(self.zip_files.keys())
+        
+        # 找出不再需要的缩略图
+        unused_thumbs = set(self.gallery_thumbnails.keys()) - current_zip_paths
+        
+        # 删除不再需要的缩略图
+        for zip_path in unused_thumbs:
+            photo = self.gallery_thumbnails.pop(zip_path, None)
+            if photo:
+                # 删除对PhotoImage的引用以帮助垃圾回收
+                del photo
+        
+        # 清理缩略图请求队列中相关的请求
+        keys_to_remove = [
+            key for key in self.gallery_thumbnail_requests.keys() 
+            if key[0] not in current_zip_paths
+        ]
+        for key in keys_to_remove:
+            self.gallery_thumbnail_requests.pop(key, None)
     
     def _reflow_gallery_cards(self):
         """Arrange gallery cards in responsive grid layout."""
@@ -241,9 +339,17 @@ class GalleryView(ttk.Frame):
                 sticky="nsew"
             )
         
+        # 配置列和行权重，确保均匀分布
         for col in range(self.gallery_columns):
             self.gallery_inner_frame.grid_columnconfigure(col, weight=1, uniform="card")
         
+        # 计算需要的行数
+        rows_needed = (len(zip_paths) + self.gallery_columns - 1) // self.gallery_columns
+        for row in range(rows_needed):
+            self.gallery_inner_frame.grid_rowconfigure(row, weight=1, uniform="card")
+        
+        # 更新画布的滚动区域
+        self._update_canvas_scrollregion()
         self._schedule_gallery_thumbnail_poll()
     
     def _create_gallery_card(self, zip_path: str, index: int):
@@ -251,8 +357,12 @@ class GalleryView(ttk.Frame):
         card_container = tk.Frame(
             self.gallery_inner_frame,
             bg="#1a1d1e",
-            highlightthickness=0
+            highlightthickness=0,
+            width=220,  # 固定宽度
+            height=280  # 固定高度
         )
+        # 确保卡片容器不会收缩
+        card_container.grid_propagate(False)
         
         card = tk.Frame(
             card_container,
@@ -266,8 +376,10 @@ class GalleryView(ttk.Frame):
         
         self.gallery_cards[zip_path] = card_container
         
-        thumb_container = tk.Frame(card, bg="#1f2224", highlightthickness=0)
+        # 设置缩略图容器的固定高度
+        thumb_container = tk.Frame(card, bg="#1f2224", highlightthickness=0, height=200)
         thumb_container.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+        thumb_container.pack_propagate(False)  # 防止子组件改变容器大小
         
         thumb_label = tk.Label(
             thumb_container,
@@ -311,10 +423,9 @@ class GalleryView(ttk.Frame):
         )
         meta_label.pack(fill=tk.X)
         
-        for widget in (card_container, card, thumb_container, thumb_label, info_frame, title_label, meta_label):
-            widget.bind("<Button-1>", lambda e, path=zip_path: self._on_gallery_card_click(path))
-            widget.bind("<Enter>", lambda e, c=card: self._on_card_hover(c, True))
-            widget.bind("<Leave>", lambda e, c=card: self._on_card_hover(c, False))
+        # 使用更高效的方式绑定事件
+        self._bind_card_events(card_container, card, thumb_container, thumb_label, 
+                              info_frame, title_label, meta_label, zip_path)
         
         entry = self.zip_files.get(zip_path)
         members = entry[0] if entry else None
@@ -334,12 +445,29 @@ class GalleryView(ttk.Frame):
                 font=("Segoe UI", 28),
                 fg="#ff8866"
             )
+        
+        # 确保每次添加新卡片后更新滚动区域
+        self.after(10, self._update_canvas_scrollregion)
+    
+    def _bind_card_events(self, *widgets_and_path):
+        """为卡片的所有组件绑定事件"""
+        zip_path = widgets_and_path[-1]
+        widgets = widgets_and_path[:-1]
+        
+        for widget in widgets:
+            widget.bind("<Button-1>", lambda e, path=zip_path: self._on_gallery_card_click(path))
+            widget.bind("<Enter>", lambda e, c=widgets[1]: self._on_card_hover(c, True))
+            widget.bind("<Leave>", lambda e, c=widgets[1]: self._on_card_hover(c, False))
     
     def _on_card_hover(self, card: tk.Frame, is_entering: bool):
         """Handle card hover effect."""
         if is_entering:
-            card.config(bg="#2d3031")
+            # 只在不是选中状态时才改变颜色
+            card_container = card.master
+            if card_container and card_container != self.gallery_selected_zip:
+                card.config(bg="#2d3031")
         else:
+            # 恢复默认颜色
             card.config(bg="#252829")
     
     def _format_gallery_meta(self, entry) -> str:
@@ -410,6 +538,15 @@ class GalleryView(ttk.Frame):
         if cache_key in self.gallery_thumbnail_requests:
             return
         
+        # 如果已经有缓存的缩略图，则直接使用
+        existing_thumb = self.gallery_thumbnails.get(zip_path)
+        if existing_thumb:
+            label = self.gallery_thumb_labels.get(zip_path)
+            if label:
+                label.config(image=existing_thumb, text="", bg="#1f2224")
+                label.image = existing_thumb
+            return
+        
         self.gallery_thumbnail_requests[cache_key] = zip_path
         
         self.thread_pool.submit(
@@ -433,8 +570,9 @@ class GalleryView(ttk.Frame):
     def _process_gallery_thumbnail_queue(self):
         """Consume gallery thumbnail results from worker threads."""
         self._gallery_thumbnail_after_id = None
+        processed_count = 0
         try:
-            while True:
+            while processed_count < 10:  # 限制每次处理的数量以避免界面冻结
                 result = self.gallery_queue.get_nowait()
                 zip_path = self.gallery_thumbnail_requests.pop(result.cache_key, None)
                 if not zip_path:
@@ -457,6 +595,8 @@ class GalleryView(ttk.Frame):
                         image=""
                     )
                     label.image = None
+                    
+                processed_count += 1
         except queue.Empty:
             pass
         
