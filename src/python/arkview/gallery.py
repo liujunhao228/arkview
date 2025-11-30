@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import ImageTk
-from ttkbootstrap import ttk
+import ttkbootstrap as ttk
 
 from .core import ZipFileManager, LRUCache, load_image_data_async, _format_size
 
@@ -66,7 +66,7 @@ class GalleryView(ttk.Frame):
     
     def _setup_ui(self):
         """Setup the gallery UI with mobile-like design."""
-        gallery_main = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        gallery_main = ttk.Panedwindow(self, orient=tk.VERTICAL)
         gallery_main.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
         
         top_frame = ttk.Frame(gallery_main)
