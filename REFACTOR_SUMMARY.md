@@ -1,5 +1,7 @@
 # Arkview Refactoring Summary - Rust-Python Hybrid Architecture
 
+> **Note:** UI component references below describe the legacy Tkinter frontend. The current Arkview release now uses a PySide6 interface, but the architectural summary remains relevant.
+
 ## Overview
 
 Successfully refactored Arkview from a monolithic 2759-line pure Python application into a modern hybrid Rust-Python architecture that achieves:

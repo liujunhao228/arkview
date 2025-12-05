@@ -6,11 +6,11 @@ import io
 import os
 import threading
 import queue
-from typing import Optional, List, Tuple, Union
+from typing import Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
 
-from PIL import Image, ImageOps, UnidentifiedImageError, ImageTk
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 try:
     from . import arkview_core
@@ -254,7 +254,7 @@ class LoadResult:
     def __init__(
         self,
         success: bool,
-        data: Optional[Union[Image.Image, ImageTk.PhotoImage]] = None,
+        data: Optional[Image.Image] = None,
         error_message: str = "",
         cache_key: Optional[tuple] = None
     ):

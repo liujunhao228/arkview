@@ -1,5 +1,7 @@
 # Implementation Notes - Arkview Rust-Python Hybrid
 
+> **Note:** Mentions of Tkinter/ttkbootstrap reflect the previous UI implementation. Arkview now uses PySide6 for the desktop frontend.
+
 ## Executive Summary
 
 Successfully refactored Arkview from 2759-line monolithic Python application into a modern hybrid Rust-Python architecture achieving:
