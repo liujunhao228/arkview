@@ -1,5 +1,7 @@
 # UI Modernization - Arkview 4.0
 
+> **Note:** This document captures the legacy Tkinter/ttkbootstrap UI refresh. Arkview now ships with a PySide6 interface, but these notes remain for historical reference.
+
 ## Overview
 
 Arkview has been modernized with a contemporary, beautiful interface using **ttkbootstrap** - a modern theme extension for Tkinter. This provides a professional appearance while maintaining excellent performance and minimal package size increase (~1-2 MB).

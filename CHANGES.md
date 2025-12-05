@@ -244,10 +244,9 @@ None - compatibility maintained with original
   - rayon (1.7): Parallelization (optional)
   - parking_lot (0.12): Synchronization primitives
 
-### Unchanged Runtime Dependencies
-- Pillow (>=9.0.0): Image GUI operations
-- tkinter: GUI framework (Python standard)
-- tkinterdnd2 (optional): Drag & drop
+### Runtime Dependencies
+- Pillow (>=9.0.0): Image processing
+- PySide6 (>=6.5.0): Modern Qt UI toolkit (replaces tkinter/ttkbootstrap)
 
 ## Build System Changes
 
@@ -266,7 +265,7 @@ None - compatibility maintained with original
 
 ### Before
 ```bash
-pip install Pillow tkinterdnd2  # Optional
+pip install Pillow
 python Arkview.py
 ```
 

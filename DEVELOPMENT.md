@@ -192,20 +192,15 @@ This means the Rust extension wasn't built. Rebuild with maturin:
 maturin develop --release
 ```
 
-### Tkinter Import Error
+### PySide6 Import Error
 
-Install tkinter for your platform:
+PySide6 is installed automatically via `pip install .`, but you can install it manually:
 
 ```bash
-# Ubuntu/Debian
-sudo apt-get install python3-tk
-
-# macOS (Homebrew)
-brew install python-tk@3.x
-
-# Windows (included with Python installer)
-# Ensure "tcl/tk and IDLE" is checked during Python installation
+pip install PySide6>=6.5.0
 ```
+
+If you are on Linux and encounter issues with missing Qt platform plugins, ensure you have the necessary system packages (e.g., `qt6-base-dev` on Debian/Ubuntu) or run with `QT_QPA_PLATFORM=xcb` on Wayland.
 
 ## Contributing Guidelines
 

@@ -12,7 +12,7 @@ Arkview is a modern, high-performance image viewer designed to quickly browse im
 - **Fast ZIP Scanning**: Quickly identifies archives containing only image files using native Rust implementation
 - **Preview & Viewer**: Browse thumbnails with a full-screen multi-image viewer
 - **Performance Mode**: Optimize for speed and lower memory usage on limited hardware
-- **Drag & Drop**: Drag and drop archives into the application (requires `tkinterdnd2`)
+- **Drag & Drop**: Native drag-and-drop support powered by PySide6
 - **Batch Scanning**: Scan entire directories for image archives
 - **Caching**: LRU cache for thumbnail and viewer images
 - **Cross-Platform**: Works on Windows, macOS, and Linux
@@ -118,11 +118,12 @@ maturin build --release --out dist
 ### Core Dependencies
 
 - **Pillow** (>=9.0.0): Image processing
+- **PySide6** (>=6.5.0): Modern Qt-based desktop UI toolkit
 - **PyO3**: Rust-Python interop
 
 ### Optional Dependencies
 
-- **tkinterdnd2** (>=0.3.0): Drag and drop support
+- None (drag-and-drop and styling are provided by PySide6 out of the box)
 
 ### Rust Dependencies
 
@@ -141,7 +142,7 @@ maturin build --release --out dist
 
 - Maximum ZIP file size: Determined by available memory
 - Supported formats: JPEG, PNG, GIF, BMP, TIFF, WebP, ICO
-- Single-threaded UI (tkinter limitation)
+- UI updates run on the Qt main thread; keep long-running work in background threads (Arkview already offloads image decoding).
 
 ## Troubleshooting
 

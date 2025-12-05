@@ -121,8 +121,8 @@ Open Settings (menu or button) to:
 - For Rust features: `pip install maturin` and rebuild
 
 **Drag & Drop not working?**
-- Install optional dependency: `pip install tkinterdnd2`
-- Restart the application
+- Drag-and-drop is built in via PySide6; ensure you launch Arkview from a graphical desktop session
+- Restart the application or try running with `QT_QPA_PLATFORM=xcb` on Wayland-based Linux desktops
 
 **Images loading slowly?**
 - Enable Performance Mode in settings
