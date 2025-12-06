@@ -96,6 +96,8 @@ class MainApp(QMainWindow):
     # Custom signals
     update_status = Signal(str)
     update_preview = Signal(object)  # (pil_image, str_error)
+    add_zip_entries_signal = Signal(list)  # List of tuples for bulk adding
+    show_error_signal = Signal(str, str)  # (title, message)
     
     def __init__(self):
         super().__init__()
@@ -138,6 +140,8 @@ class MainApp(QMainWindow):
         # Connect signals
         self.update_status.connect(self._on_update_status)
         self.update_preview.connect(self._on_update_preview)
+        self.add_zip_entries_signal.connect(self._add_zip_entries_bulk)
+        self.show_error_signal.connect(self._show_error)
         
         # Set dark theme
         self._apply_dark_theme()
@@ -650,8 +654,8 @@ class MainApp(QMainWindow):
             total_files = len(zip_files)
 
             if total_files == 0:
-                # Use QTimer to safely call UI update from main thread
-                QTimer.singleShot(0, lambda: self.update_status.emit("No ZIP files found"))
+                # Use signal to safely call UI update from main thread
+                self.update_status.emit("No ZIP files found")
                 return
 
             batch_size = max(1, CONFIG["BATCH_SCAN_SIZE"])
@@ -665,8 +669,8 @@ class MainApp(QMainWindow):
                     return
                 batch = pending_entries.copy()
                 pending_entries.clear()
-                # Use QTimer to call from main thread
-                QTimer.singleShot(0, lambda: self._add_zip_entries_bulk(batch))
+                # Use signal to call from main thread
+                self.add_zip_entries_signal.emit(batch)
 
             for start in range(0, total_files, batch_size):
                 if self.scan_stop_event.is_set():
@@ -676,9 +680,9 @@ class MainApp(QMainWindow):
                 try:
                     batch_results = self.zip_scanner.batch_analyze_zips(batch_paths, collect_members=False)
                 except Exception as e:
-                    # Use QTimer to call from main thread
-                    QTimer.singleShot(0, lambda: self._show_error("Error", f"Scan error: {e}"))
-                    QTimer.singleShot(0, lambda: self.update_status.emit("Scan failed"))
+                    # Use signals to call from main thread
+                    self.show_error_signal.emit("Error", f"Scan error: {e}")
+                    self.update_status.emit("Scan failed")
                     return
 
                 for zip_path, is_valid, members, mod_time, file_size, image_count in batch_results:
@@ -691,8 +695,10 @@ class MainApp(QMainWindow):
                     flush_pending()
 
                 if processed % ui_update_interval == 0 or processed >= total_files:
-                    # Use QTimer to call from main thread
-                    QTimer.singleShot(0, lambda: self.update_status.emit(f"Scanning... {processed}/{total_files} files processed"))
+                    # Use signal to call from main thread
+                    current_processed = processed
+                    current_total = total_files
+                    self.update_status.emit(f"Scanning... {current_processed}/{current_total} files processed")
 
             flush_pending()
 
@@ -700,11 +706,11 @@ class MainApp(QMainWindow):
                 "Scan canceled" if self.scan_stop_event.is_set()
                 else f"Found {valid_found} valid archives (of {processed} scanned)"
             )
-            # Use QTimer to call from main thread
-            QTimer.singleShot(0, lambda: self.update_status.emit(final_message))
+            # Use signal to call from main thread
+            self.update_status.emit(final_message)
         except Exception as e:
-            QTimer.singleShot(0, lambda: self._show_error("Error", f"Scan error: {e}"))
-            QTimer.singleShot(0, lambda: self.update_status.emit("Scan failed"))
+            self.show_error_signal.emit("Error", f"Scan error: {e}")
+            self.update_status.emit("Scan failed")
 
     def _show_error(self, title: str, message: str):
         """Show error message (thread-safe)."""
