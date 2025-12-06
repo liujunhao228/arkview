@@ -135,69 +135,77 @@ class GalleryView(ttk.Frame):
     
     def _process_gallery_thumbnail_queue(self):
         """Consume gallery thumbnail results from worker threads."""
+        print(f"Processing gallery thumbnail queue, items: {self.gallery_queue.qsize()}")
         self._gallery_thumbnail_after_id = None
         processed_count = 0
+        
         try:
-            while processed_count < 20:
-                result = self.gallery_queue.get_nowait()
+            while processed_count < 30:  # 增加每次处理的数量
+                try:
+                    result = self.gallery_queue.get_nowait()
+                    print(f"Got result from queue: success={getattr(result, 'success', 'N/A')}, cache_key={getattr(result, 'cache_key', 'N/A')}")
+                except queue.Empty:
+                    break
+                    
+                # 尝试从结果中提取卡片键
+                card_key = self._extract_card_key_from_result(result)
+                print(f"Extracted card_key: {card_key}")
                 
-                card_key = None
-                # --- 修复点 1: 正确处理画廊视图的缓存键 ---
-                # 画廊视图的 cache_key 是 (zip_path, member_path)
-                if isinstance(result.cache_key, tuple) and len(result.cache_key) == 2 and not isinstance(result.cache_key[0], tuple):
-                    zip_path, member_path = result.cache_key
-                    # 从请求字典中获取我们当初存储的 card_key (也就是 zip_path)
-                    card_key = self.gallery_thumbnail_requests.get(result.cache_key)
-                
-                # --- 修复点 2: 正确处理专辑视图的缓存键 ---
-                # 专辑视图的 cache_key 是 ((zip_path, member_path), card_key)
-                elif isinstance(result.cache_key, tuple) and len(result.cache_key) == 2 and isinstance(result.cache_key[0], tuple):
-                    card_key = result.cache_key[1]
-
-                # 如果无法确定 card_key，则跳过
+                # 如果_extract_card_key_from_result没有返回有效的card_key，
+                # 则尝试直接使用cache_key（如果它是字符串）或者cache_key的第一个元素
                 if not card_key:
+                    if hasattr(result, 'cache_key'):
+                        if isinstance(result.cache_key, str):
+                            card_key = result.cache_key
+                        elif isinstance(result.cache_key, tuple) and len(result.cache_key) > 0:
+                            # 对于画廊视图，cache_key应该是(zip_path, member_path)
+                            card_key = result.cache_key[0]
+                
+                if not card_key:
+                    print(f"No card key found for result with cache_key: {getattr(result, 'cache_key', 'unknown')}")
+                    # 清理请求记录
+                    self._cleanup_thumbnail_request(result)
                     processed_count += 1
                     continue
                 
-                # 获取对应的标签
                 label = self.gallery_thumb_labels.get(card_key)
                 if not label:
-                    processed_count += 1
-                    continue
+                    # 尝试使用cache_key的第一个元素作为备选
+                    if hasattr(result, 'cache_key') and isinstance(result.cache_key, tuple) and len(result.cache_key) > 0:
+                        alt_key = result.cache_key[0]
+                        label = self.gallery_thumb_labels.get(alt_key)
+                        if label:
+                            card_key = alt_key  # 更新card_key为实际找到标签的键
+                            print(f"Using alternative key: {alt_key}")
+                    
+                    # 如果仍然找不到标签，则跳过
+                    if not label:
+                        print(f"No label found for card key: {card_key}")
+                        # 清理请求记录
+                        self._cleanup_thumbnail_request(result)
+                        processed_count += 1
+                        continue
                 
-                if result.success and result.data:
-                    try:
-                        photo = ImageTk.PhotoImage(result.data)
-                        self.gallery_thumbnails[card_key] = photo
-                        label.config(image=photo, text="", bg="#1f2224")
-                        label.image = photo
-                    except Exception as e:
-                        print(f"Error creating PhotoImage for {card_key}: {e}")
-                        label.config(
-                            text="⚠️",
-                            font=("Segoe UI", 28),
-                            fg="#ff7b72",
-                            image=""
-                        )
-                        label.image = None
-                else:
-                    label.config(
-                        text="⚠️",
-                        font=("Segoe UI", 28),
-                        fg="#ff7b72",
-                        image=""
-                    )
-                    label.image = None
-                    
-                # --- 修复点 3: 只清理画廊视图的请求记录 ---
-                # 画廊视图的请求记录需要被清理，专辑视图的不需要
-                if isinstance(result.cache_key, tuple) and len(result.cache_key) == 2 and not isinstance(result.cache_key[0], tuple):
-                    if result.cache_key in self.gallery_thumbnail_requests:
-                        del self.gallery_thumbnail_requests[result.cache_key]
-                    
+                # 处理缩略图结果
+                self._handle_thumbnail_result(result, card_key, label)
+                
+                # 清理请求记录
+                self._cleanup_thumbnail_request(result)
+                
                 processed_count += 1
-        except queue.Empty:
-            pass
+                
+        except Exception as e:
+            print(f"Error processing thumbnail queue: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # 继续轮询如果有更多请求
+        if self.gallery_thumbnail_requests or processed_count > 0:
+            self._schedule_gallery_thumbnail_poll()
+        
+        # 更新画布的滚动区域，确保界面正确显示
+        self.after(10, self._update_canvas_scrollregion)
+        print(f"Finished processing thumbnail queue, processed: {processed_count}")
     
     def _on_gallery_canvas_configure(self, event=None):
         """Handle canvas configure events."""
@@ -399,6 +407,8 @@ class GalleryView(ttk.Frame):
             else:
                 # 成员列表尚未加载，需要先加载再请求缩略图
                 self._request_gallery_thumbnail_for_unloaded_members(zip_path)
+                # 确保轮询已经开始
+                self._schedule_gallery_thumbnail_poll()
         else:
             # 如果没有entry，显示警告图标
             thumb_label.config(
@@ -406,6 +416,8 @@ class GalleryView(ttk.Frame):
                 font=("Segoe UI", 28),
                 fg="#ff7b72"
             )
+            # 确保轮询已经开始
+            self._schedule_gallery_thumbnail_poll()
     
     def _ensure_members_loaded_and_request_thumbnail(self, zip_path: str):
         """
@@ -446,7 +458,10 @@ class GalleryView(ttk.Frame):
     def _request_gallery_thumbnail(self, zip_path: str, member_path: str):
         """Queue a thumbnail load request for a gallery card."""
         cache_key = (zip_path, member_path)
+        print(f"Requesting thumbnail for {zip_path}, member: {member_path}, cache_key: {cache_key}")
+        
         if cache_key in self.gallery_thumbnail_requests:
+            print(f"Thumbnail request already exists for {cache_key}")
             # 即使已经存在请求，也要确保轮询已经开始
             self._schedule_gallery_thumbnail_poll()
             return
@@ -454,6 +469,7 @@ class GalleryView(ttk.Frame):
         # 如果已经有缓存的缩略图，则直接使用
         existing_thumb = self.gallery_thumbnails.get(zip_path)
         if existing_thumb:
+            print(f"Using cached thumbnail for {zip_path}")
             label = self.gallery_thumb_labels.get(zip_path)
             if label:
                 label.config(image=existing_thumb, text="", bg="#1f2224")
@@ -464,6 +480,7 @@ class GalleryView(ttk.Frame):
         
         # 正确地将 zip_path 作为值存储，以便后续查找
         self.gallery_thumbnail_requests[cache_key] = zip_path
+        print(f"Added thumbnail request: {cache_key} -> {zip_path}")
         
         self.thread_pool.submit(
             load_image_data_async,
@@ -480,6 +497,7 @@ class GalleryView(ttk.Frame):
         
         # 确保缩略图轮询已经启动
         self._schedule_gallery_thumbnail_poll()
+        print("Scheduled thumbnail poll")
     
     def _request_gallery_thumbnail_for_unloaded_members(self, zip_path: str):
         """为成员列表尚未加载的zip文件请求缩略图"""
@@ -511,7 +529,7 @@ class GalleryView(ttk.Frame):
             )
     
     def _reflow_gallery_cards(self):
-        """改进的响应式布局算法"""
+        """改进的响应式布局算法并确保触发缩略图加载"""
         # 根据实际窗口大小动态调整列数
         canvas_width = self.gallery_canvas.winfo_width()
         
@@ -551,11 +569,15 @@ class GalleryView(ttk.Frame):
         for row in range(rows_needed):
             self.gallery_inner_frame.grid_rowconfigure(row, weight=1, uniform="card")
         
-        # 确保开始处理缩略图队列
+        # 确保开始处理缩略图队列 - 在布局变化后强制触发缩略图加载
         self._schedule_gallery_thumbnail_poll()
         
         # 延迟更新画布的滚动区域以确保布局稳定
         self.after(50, self._update_canvas_scrollregion)
+        
+        # 额外确保缩略图轮询已启动（双重保障）
+        if not self._gallery_thumbnail_after_id:
+            self._schedule_gallery_thumbnail_poll()
     
     def _schedule_gallery_thumbnail_poll(self):
         """带防抖动的轮询调度"""
@@ -566,72 +588,73 @@ class GalleryView(ttk.Frame):
         # 延迟执行以合并快速连续的请求
         self._gallery_thumbnail_after_id = self.after(50, self._process_gallery_thumbnail_queue)
     
-    def _process_gallery_thumbnail_queue(self):
-        """Consume gallery thumbnail results from worker threads."""
-        self._gallery_thumbnail_after_id = None
-        processed_count = 0
-        
-        try:
-            while processed_count < 30:  # 增加每次处理的数量
-                try:
-                    result = self.gallery_queue.get_nowait()
-                except queue.Empty:
-                    break
-                    
-                # 更清晰地区分不同视图模式的处理
-                card_key = self._extract_card_key_from_result(result)
-                
-                if not card_key:
-                    processed_count += 1
-                    continue
-                
-                label = self.gallery_thumb_labels.get(card_key)
-                if not label:
-                    processed_count += 1
-                    continue
-                
-                # 处理缩略图结果
-                self._handle_thumbnail_result(result, card_key, label)
-                
-                # 清理请求记录
-                self._cleanup_thumbnail_request(result)
-                
-                processed_count += 1
-                
-        except Exception as e:
-            print(f"Error processing thumbnail queue: {e}")
-        
-        # 继续轮询如果有更多请求
-        if self.gallery_thumbnail_requests or processed_count > 0:
-            self._schedule_gallery_thumbnail_poll()
-        
-        # 更新画布的滚动区域，确保界面正确显示
-        self.after(10, self._update_canvas_scrollregion)
-
     def _extract_card_key_from_result(self, result):
         """从结果中提取card_key"""
-        if isinstance(result.cache_key, tuple):
-            if len(result.cache_key) == 2:
-                # 画廊视图: (zip_path, member_path)
-                if not isinstance(result.cache_key[0], tuple):
-                    return self.gallery_thumbnail_requests.get(result.cache_key)
-                # 专辑视图: ((zip_path, member_path), card_key)
+        try:
+            if not hasattr(result, 'cache_key'):
+                print("Result object has no attribute 'cache_key'")
+                return None
+                
+            cache_key = result.cache_key
+            
+            # 情况1: 画廊视图 - cache_key is (zip_path, member_path)
+            if isinstance(cache_key, tuple) and len(cache_key) == 2 and not isinstance(cache_key[0], tuple):
+                card_key = self.gallery_thumbnail_requests.get(cache_key)
+                if card_key:
+                    return card_key
                 else:
-                    return result.cache_key[1]
+                    print(f"Failed to find card_key for gallery view cache_key: {cache_key}")
+                    return None
+                    
+            # 情况2: 专辑视图 - cache_key is ((zip_path, member_path), card_key)
+            elif (isinstance(cache_key, tuple) and len(cache_key) == 2 and 
+                  isinstance(cache_key[0], tuple) and len(cache_key[0]) == 2):
+                # 返回嵌套元组中的第二个元素，即 card_key
+                return cache_key[1]
+                
+            # 情况3: 兼容旧格式或特殊情况，cache_key 直接是字符串 (zip_path)
+            elif isinstance(cache_key, str):
+                return cache_key
+                
+            # 情况4: 长度为1的元组
+            elif isinstance(cache_key, tuple) and len(cache_key) == 1:
+                return cache_key[0]
+                
+            else:
+                print(f"Unexpected cache_key format: {cache_key} (type: {type(cache_key)})")
+                
+        except Exception as e:
+            print(f"Exception in _extract_card_key_from_result: {e}")
+            import traceback
+            traceback.print_exc()
+            
         return None
 
     def _handle_thumbnail_result(self, result, card_key, label):
         """处理单个缩略图结果"""
-        if result.success and result.data:
-            try:
-                photo = ImageTk.PhotoImage(result.data)
-                self.gallery_thumbnails[card_key] = photo
-                label.config(image=photo, text="", bg="#1f2224")
-                label.image = photo  # 保持引用
-            except Exception as e:
-                print(f"Error creating PhotoImage for {card_key}: {e}")
+        print(f"Handling thumbnail result for card_key: {card_key}")
+        try:
+            if result.success and result.data:
+                try:
+                    print(f"Creating PhotoImage for {card_key}")
+                    photo = ImageTk.PhotoImage(result.data)
+                    self.gallery_thumbnails[card_key] = photo
+                    label.config(image=photo, text="", bg="#1f2224")
+                    label.image = photo  # 保持引用
+                    print(f"Successfully set thumbnail for {card_key}")
+                except Exception as e:
+                    print(f"Error creating PhotoImage for {card_key}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self._set_error_thumbnail(label)
+            else:
+                error_msg = getattr(result, 'error_message', 'Unknown error')
+                print(f"Thumbnail load failed for {card_key}: {error_msg}")
                 self._set_error_thumbnail(label)
-        else:
+        except Exception as e:
+            print(f"Error in _handle_thumbnail_result for {card_key}: {e}")
+            import traceback
+            traceback.print_exc()
             self._set_error_thumbnail(label)
 
     def _set_error_thumbnail(self, label):
@@ -647,10 +670,39 @@ class GalleryView(ttk.Frame):
 
     def _cleanup_thumbnail_request(self, result):
         """清理缩略图请求"""
-        # 画廊视图的请求记录需要被清理，专辑视图的不需要
-        if isinstance(result.cache_key, tuple) and len(result.cache_key) == 2 and not isinstance(result.cache_key[0], tuple):
-            if result.cache_key in self.gallery_thumbnail_requests:
-                del self.gallery_thumbnail_requests[result.cache_key]
+        try:
+            # 画廊视图的请求记录需要被清理，专辑视图的不需要
+            if (hasattr(result, 'cache_key') and 
+                isinstance(result.cache_key, tuple) and 
+                len(result.cache_key) == 2 and 
+                not isinstance(result.cache_key[0], tuple)):
+                if result.cache_key in self.gallery_thumbnail_requests:
+                    del self.gallery_thumbnail_requests[result.cache_key]
+        except Exception as e:
+            print(f"Error cleaning up thumbnail request: {e}")
+    
+    def _debug_thumbnail_process(self):
+        """调试缩略图处理流程"""
+        print("=== Thumbnail Process Debug Info ===")
+        print(f"Gallery thumbnail requests: {len(self.gallery_thumbnail_requests)}")
+        print(f"Gallery thumbnails: {len(self.gallery_thumbnails)}")
+        print(f"Gallery thumb labels: {len(self.gallery_thumb_labels)}")
+        print(f"Gallery cards: {len(self.gallery_cards)}")
+        
+        if self.gallery_thumbnail_requests:
+            print("Current thumbnail requests:")
+            for key, value in self.gallery_thumbnail_requests.items():
+                print(f"  {key} -> {value}")
+        
+        if self.gallery_thumbnails:
+            print("Current thumbnails:")
+            for key, value in self.gallery_thumbnails.items():
+                print(f"  {key}: {type(value)}")
+        
+        if self.gallery_thumb_labels:
+            print("Current thumb labels:")
+            for key, value in self.gallery_thumb_labels.items():
+                print(f"  {key}: {value}")
     
     def _show_gallery_view(self):
         """显示压缩包画廊视图"""
@@ -670,147 +722,3 @@ class GalleryView(ttk.Frame):
         self._display_album_content(zip_path)
         # 确保缩略图加载开始
         self._schedule_gallery_thumbnail_poll()
-    
-    def _display_album_content(self, zip_path: str):
-        """显示特定压缩包的内容"""
-        # 清除现有内容
-        for child in self.gallery_inner_frame.winfo_children():
-            child.destroy()
-        
-        # 清除引用
-        self.gallery_cards.clear()
-        self.gallery_thumb_labels.clear()
-        self.gallery_title_labels.clear()
-        
-        entry = self.zip_files.get(zip_path)
-        if not entry:
-            return
-        
-        members = entry[0]
-        if members is None:
-            members = self.ensure_members_loaded(zip_path)
-        
-        if not members:
-            empty_label = ttk.Label(
-                self.gallery_inner_frame,
-                text="No images found in this album",
-                font=("Segoe UI", 12),
-                justify=tk.CENTER,
-                foreground="#666666"
-            )
-            empty_label.grid(row=0, column=0, padx=20, pady=80)
-            self.gallery_count_label.config(text="0 images")
-            self._update_canvas_scrollregion()
-            return
-        
-        self.gallery_count_label.config(text=f"{len(members)} images")
-        
-        # 显示专辑中的所有图片
-        for idx, member_path in enumerate(members):
-            self._create_image_card(zip_path, member_path, idx)
-        
-        self._reflow_gallery_cards()
-        
-        # 重置滚动位置
-        self.gallery_canvas.yview_moveto(0)
-
-    def _create_image_card(self, zip_path: str, member_path: str, index: int):
-        """为专辑中的单个图像创建卡片"""
-        card_container = tk.Frame(
-            self.gallery_inner_frame,
-            bg="#1a1d1e",
-            highlightthickness=0,
-            width=220,
-            height=280
-        )
-        card_container.grid_propagate(False)
-        
-        card = tk.Frame(
-            card_container,
-            bg="#252829",
-            bd=0,
-            relief=tk.FLAT,
-            cursor="hand2",
-            highlightthickness=0
-        )
-        card.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
-        
-        # 使用索引作为键
-        card_key = f"{zip_path}:{index}"
-        self.gallery_cards[card_key] = card_container
-        
-        # 设置缩略图容器的固定高度
-        thumb_container = tk.Frame(card, bg="#1f2224", highlightthickness=0, height=200)
-        thumb_container.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
-        thumb_container.pack_propagate(False)
-        
-        thumb_label = tk.Label(
-            thumb_container,
-            text="⏳",
-            bg="#1f2224",
-            fg="#555555",
-            wraplength=220,
-            justify=tk.CENTER,
-            font=("Segoe UI", 32),
-            width=20,
-            height=8
-        )
-        thumb_label.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
-        self.gallery_thumb_labels[card_key] = thumb_label
-        
-        info_frame = tk.Frame(card, bg="#252829", highlightthickness=0)
-        info_frame.pack(fill=tk.X, padx=12, pady=8)
-        
-        title_label = tk.Label(
-            info_frame,
-            text=os.path.basename(member_path),
-            bg="#252829",
-            fg="#ffffff",
-            wraplength=220,
-            justify=tk.LEFT,
-            font=("Segoe UI", 10, "bold"),
-            anchor=tk.W
-        )
-        title_label.pack(fill=tk.X, pady=(0, 4))
-        self.gallery_title_labels[card_key] = title_label
-        
-        # 绑定事件
-        for widget in [card_container, card, thumb_container, thumb_label, info_frame, title_label]:
-            widget.bind("<Button-1>", lambda e, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i))
-        
-        # 请求缩略图
-        self._request_image_thumbnail(zip_path, member_path, card_key)
-
-    def _request_image_thumbnail(self, zip_path: str, member_path: str, card_key: str):
-        """为专辑中的图像请求缩略图"""
-        cache_key = (zip_path, member_path)
-        
-        # 使用特殊格式的键来区分专辑视图和画廊视图
-        special_key = (cache_key, card_key)
-        
-        self.thread_pool.submit(
-            load_image_data_async,
-            zip_path,
-            member_path,
-            self.app_settings['max_thumbnail_size'],
-            self.config["GALLERY_THUMB_SIZE"],
-            self.gallery_queue,
-            self.cache,
-            special_key,
-            self.zip_manager,
-            self.app_settings['performance_mode']
-        )
-
-    def _on_image_card_click(self, zip_path: str, member_path: str, index: int):
-        """处理图像卡片点击事件"""
-        # 打开查看器显示这张图片
-        if self.open_viewer_callback:
-            # 获取当前专辑的所有成员
-            entry = self.zip_files.get(zip_path)
-            if entry:
-                members = entry[0]
-                if members is None:
-                    members = self.ensure_members_loaded(zip_path)
-                
-                if members:
-                    self.open_viewer_callback(zip_path, members, index)
