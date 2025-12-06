@@ -6,7 +6,6 @@ import os
 import sys
 import platform
 import queue
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -33,6 +32,8 @@ from PySide6.QtGui import (
 from PIL import Image
 import PIL.ImageQt
 
+# 导入新的配置模块
+from .config import CONFIG, parse_human_size
 from .core import (
     ZipScanner, ZipFileManager, LRUCache, load_image_data_async,
     LoadResult, _format_size, RUST_AVAILABLE
@@ -41,53 +42,6 @@ from .pyside_ui import (
     SettingsDialog, ImageViewerWindow, SlideView
 )
 from .pyside_gallery import GalleryView
-
-
-CONFIG: Dict[str, Any] = {
-    "IMAGE_EXTENSIONS": {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'},
-    "THUMBNAIL_SIZE": (280, 280),
-    "PERFORMANCE_THUMBNAIL_SIZE": (180, 180),
-    "GALLERY_THUMB_SIZE": (220, 220),
-    "GALLERY_PREVIEW_SIZE": (480, 480),
-    "BATCH_SCAN_SIZE": 50,  # Number of files to scan in one batch
-    "BATCH_UPDATE_INTERVAL": 20,  # UI update interval (number of files)
-    "MAX_THUMBNAIL_LOAD_SIZE": 10 * 1024 * 1024,
-    "PERFORMANCE_MAX_THUMBNAIL_LOAD_SIZE": 3 * 1024 * 1024,
-    "MAX_VIEWER_LOAD_SIZE": 100 * 1024 * 1024,
-    "PERFORMANCE_MAX_VIEWER_LOAD_SIZE": 30 * 1024 * 1024,
-    "CACHE_MAX_ITEMS_NORMAL": 50,
-    "CACHE_MAX_ITEMS_PERFORMANCE": 25,
-    "PRELOAD_VIEWER_NEIGHBORS_NORMAL": 2,
-    "PRELOAD_VIEWER_NEIGHBORS_PERFORMANCE": 1,
-    "PRELOAD_NEXT_THUMBNAIL": True,
-    "WINDOW_SIZE": (1050, 750),
-    "VIEWER_ZOOM_FACTOR": 1.2,
-    "VIEWER_MAX_ZOOM": 10.0,
-    "VIEWER_MIN_ZOOM": 0.1,
-    "PREVIEW_UPDATE_DELAY": 250,
-    "THREAD_POOL_WORKERS": min(8, (os.cpu_count() or 1) + 4),
-    "APP_VERSION": "4.0 - Rust-Python Hybrid",
-}
-
-
-def parse_human_size(size_str: str) -> Optional[int]:
-    """Parses human-readable size string into bytes."""
-    size_str = size_str.strip().upper()
-    if not size_str:
-        return None
-    match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT])?B?$', size_str)
-    if not match:
-        if size_str.isdigit():
-            return int(size_str)
-        return -1
-
-    value = float(match.group(1))
-    unit = match.group(2)
-
-    multipliers = {'G': 1024**3, 'M': 1024**2, 'K': 1024, None: 1}
-    multiplier = multipliers.get(unit, 1)
-
-    return int(value * multiplier)
 
 
 class ThumbnailLoader(QObject):
@@ -664,26 +618,32 @@ class MainApp(QMainWindow):
         shortcut_right.triggered.connect(lambda: self._handle_gallery_key("right"))
         self.addAction(shortcut_right)
 
+    # View constants
+    VIEWS = ["explorer", "gallery", "slide"]
+    VIEW_DISPLAY_NAMES = {
+        "explorer": "Resource Explorer",
+        "gallery": "Gallery",
+        "slide": "Slide"
+    }
+    
     def _handle_tab_switch(self):
-        """Handle Tab key to switch views."""
-        if self.current_view == "explorer":
-            self._switch_view("gallery")
-        else:
-            self._switch_view("explorer")
+        """Handle Tab key to switch between main views."""
+        view_order = ["explorer", "gallery"]
+        try:
+            current_index = view_order.index(self.current_view)
+            next_index = (current_index + 1) % len(view_order)
+            self._switch_view(view_order[next_index])
+        except ValueError:
+            self._switch_view("explorer")  # Default to explorer if current view not in order
 
     def _handle_gallery_key(self, direction: str):
         """Handle gallery navigation keys."""
-        if self.current_view != "gallery" or not self.gallery_widget:
-            return
-        # Forward to gallery widget
-        self.gallery_widget.handle_keypress(direction)
+        if self.current_view == "gallery" and self.gallery_widget:
+            self.gallery_widget.handle_keypress(direction)
 
     def _switch_view(self, view: str):
-        """Switch between explorer and gallery views."""
-        if view not in ["explorer", "gallery", "slide"]:
-            return
-
-        if self.current_view == view:
+        """Switch between different views."""
+        if view not in self.VIEWS or self.current_view == view:
             return
 
         # Save context when leaving slide view
@@ -691,97 +651,95 @@ class MainApp(QMainWindow):
             self.slide_view_context["previous_view"] = self.current_view
 
         self.current_view = view
-        self._update_view_buttons()
-        self._update_view_visibility()
-
-        if view == "gallery" and self.gallery_widget:
-            self.gallery_widget.populate()
-        elif view == "slide" and self.slide_widget:
-            # Context should be set before calling this method
-            pass
+        self._update_view_state()
 
     def _switch_to_previous_view(self):
         """Switch back to the previous view from slide view."""
         previous_view = self.slide_view_context.get("previous_view", "explorer")
         self._switch_view(previous_view)
 
+    def _update_view_state(self):
+        """Update both button states and view visibility."""
+        self._update_view_buttons()
+        self._update_view_visibility()
+        self._handle_post_switch_action()
+
     def _update_view_buttons(self):
         """Update view button styles based on current view."""
-        # Reset all buttons
-        self.explorer_view_button.setStyleSheet("""
+        # Common style components
+        normal_style = """
             QPushButton {
                 background-color: #3a3f4b;
                 border: 1px solid #444a58;
                 color: #e8eaed;
             }
-        """)
-        self.gallery_view_button.setStyleSheet("""
+        """
+        active_style = """
             QPushButton {
-                background-color: #3a3f4b;
-                border: 1px solid #444a58;
-                color: #e8eaed;
+                background-color: #00bc8c;
+                border-color: #00a47a;
+                color: #ffffff;
+                font-weight: bold;
             }
-        """)
+        """
         
-        # Highlight current view
+        # Reset all buttons to normal style
+        self.explorer_view_button.setStyleSheet(normal_style)
+        self.gallery_view_button.setStyleSheet(normal_style)
+        
+        # Apply active style to current view button
         if self.current_view == "explorer":
-            self.explorer_view_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #00bc8c;
-                    border-color: #00a47a;
-                    color: #ffffff;
-                    font-weight: bold;
-                }
-            """)
+            self.explorer_view_button.setStyleSheet(active_style)
         elif self.current_view == "gallery":
-            self.gallery_view_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #00bc8c;
-                    border-color: #00a47a;
-                    color: #ffffff;
-                    font-weight: bold;
-                }
-            """)
+            self.gallery_view_button.setStyleSheet(active_style)
 
     def _update_view_visibility(self):
         """Update view visibility based on current view."""
+        # Hide all views first
         self.explorer_view_frame.hide()
         self.gallery_view_frame.hide()
         self.slide_view_frame.hide()
         
-        if self.current_view == "explorer":
-            self.explorer_view_frame.show()
-        elif self.current_view == "gallery":
-            self.gallery_view_frame.show()
-        elif self.current_view == "slide":
-            self.slide_view_frame.show()
+        # Show current view
+        view_frames = {
+            "explorer": self.explorer_view_frame,
+            "gallery": self.gallery_view_frame,
+            "slide": self.slide_view_frame
+        }
+        
+        if self.current_view in view_frames:
+            view_frames[self.current_view].show()
+
+    def _handle_post_switch_action(self):
+        """Handle actions that need to occur after view switching."""
+        # Special handling for gallery view
+        if self.current_view == "gallery" and self.gallery_widget:
+            self.gallery_widget.populate()
+            
+        # Special handling for slide view
+        elif self.current_view == "slide" and self.slide_widget:
+            # Context should be set before calling this method
+            pass
 
     def _refresh_gallery(self):
-        """Refresh gallery view if visible."""
-        print(f"[DEBUG] Refreshing gallery, current view: {self.current_view}")
-        print(f"[DEBUG] Gallery widget exists: {self.gallery_widget is not None}")
-        if self.gallery_widget and self.current_view == "gallery":
-            print("[DEBUG] Calling gallery populate")
-            try:
-                self.gallery_widget.populate()
-            except Exception as e:
-                print(f"[ERROR] Error populating gallery: {e}")
-        else:
-            print("[DEBUG] Gallery not visible or widget not initialized")
-            if not self.gallery_widget:
-                print("[DEBUG] Gallery widget is None")
-            if self.current_view != "gallery":
-                print(f"[DEBUG] Current view is {self.current_view}, not 'gallery'")
+        """Refresh gallery view if it's currently active."""
+        if self.current_view == "gallery" and self.gallery_widget:
+            self.gallery_widget.populate()
 
+    # ==================== ZIP文件处理相关方法 ====================
+    
     def _scan_directory(self):
-        """Scan a directory for ZIP files."""
+        """扫描目录中的ZIP文件"""
         from PySide6.QtWidgets import QFileDialog
+        
         directory = QFileDialog.getExistingDirectory(self, "Select Directory to Scan")
         if not directory:
             return
 
         self.update_status.emit("Scanning...")
         self.scan_stop_event.clear()
+        
+        # 在单独的线程中执行扫描操作
         self.scan_thread = threading.Thread(
             target=self._scan_directory_worker,
             args=(directory,),
@@ -790,30 +748,34 @@ class MainApp(QMainWindow):
         self.scan_thread.start()
 
     def _scan_directory_worker(self, directory: str):
-        """Worker thread for scanning a directory with batch processing."""
+        """扫描目录的工作线程"""
         try:
+            # 获取所有ZIP文件
             zip_files = [str(p) for p in Path(directory).glob("**/*.zip")]
             total_files = len(zip_files)
 
             if total_files == 0:
-                # Use signal to safely call UI update from main thread
                 self.update_status.emit("No ZIP files found")
                 return
 
+            # 批量处理参数
             batch_size = max(1, CONFIG["BATCH_SCAN_SIZE"])
             ui_update_interval = max(1, CONFIG["BATCH_UPDATE_INTERVAL"])
+            
+            # 处理状态
             pending_entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]] = []
             processed = 0
             valid_found = 0
 
             def flush_pending():
+                """刷新待处理的条目"""
                 if not pending_entries:
                     return
                 batch = pending_entries.copy()
                 pending_entries.clear()
-                # Use signal to call from main thread
                 self.add_zip_entries_signal.emit(batch)
 
+            # 分批处理ZIP文件
             for start in range(0, total_files, batch_size):
                 if self.scan_stop_event.is_set():
                     break
@@ -822,46 +784,48 @@ class MainApp(QMainWindow):
                 try:
                     batch_results = self.zip_scanner.batch_analyze_zips(batch_paths, collect_members=False)
                 except Exception as e:
-                    # Use signals to call from main thread
-                    self.show_error_signal.emit("Error", f"Scan error: {e}")
-                    self.update_status.emit("Scan failed")
+                    self._handle_scan_error(e)
                     return
 
+                # 处理分析结果
                 for zip_path, is_valid, members, mod_time, file_size, image_count in batch_results:
                     processed += 1
                     if is_valid:
                         pending_entries.append((zip_path, members, mod_time, file_size, image_count))
                         valid_found += 1
 
+                # 定期刷新待处理条目
                 if len(pending_entries) >= batch_size:
                     flush_pending()
 
+                # 更新进度
                 if processed % ui_update_interval == 0 or processed >= total_files:
-                    # Emit signal for progress updates
                     self.scan_progress.emit(processed, total_files)
 
+            # 刷新剩余条目
             flush_pending()
 
+            # 发送最终状态
             final_message = (
                 "Scan canceled" if self.scan_stop_event.is_set()
                 else f"Found {valid_found} valid archives (of {processed} scanned)"
             )
-            # Use signal to call from main thread
             self.update_status.emit(final_message)
-            # Emit completion signal
             self.scan_completed.emit(valid_found, processed)
+            
         except Exception as e:
-            self.show_error_signal.emit("Error", f"Scan error: {e}")
-            self.update_status.emit("Scan failed")
+            self._handle_scan_error(e)
 
-    def _show_error(self, title: str, message: str):
-        """Show error message (thread-safe)."""
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.critical(self, title, message)
+    def _handle_scan_error(self, error: Exception):
+        """处理扫描过程中的错误"""
+        error_msg = f"Scan error: {error}"
+        self.show_error_signal.emit("Error", error_msg)
+        self.update_status.emit("Scan failed")
 
     def _add_zip_file(self):
-        """Add a single ZIP file."""
+        """添加单个ZIP文件"""
         from PySide6.QtWidgets import QFileDialog
+        
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select ZIP File",
@@ -872,18 +836,25 @@ class MainApp(QMainWindow):
             self._analyze_and_add(file_path)
 
     def _analyze_and_add(self, zip_path: str):
-        """Analyze and add a ZIP file."""
-        is_valid, members, mod_time, file_size, image_count = self.zip_scanner.analyze_zip(zip_path)
+        """分析并添加ZIP文件"""
+        try:
+            is_valid, members, mod_time, file_size, image_count = self.zip_scanner.analyze_zip(zip_path)
 
-        if is_valid and members:
-            self._add_zip_entry(zip_path, members, mod_time, file_size)
-        else:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(
-                self,
-                "Not Valid",
-                f"'{os.path.basename(zip_path)}' does not contain only images."
-            )
+            if is_valid and members:
+                self._add_zip_entry(zip_path, members, mod_time, file_size, image_count)
+            else:
+                self._show_invalid_zip_warning(zip_path)
+        except Exception as e:
+            self._show_error("Analysis Error", f"Failed to analyze ZIP file: {e}")
+
+    def _show_invalid_zip_warning(self, zip_path: str):
+        """显示无效ZIP文件警告"""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            self,
+            "Not Valid",
+            f"'{os.path.basename(zip_path)}' does not contain only images."
+        )
 
     def _add_zip_entry(
         self,
@@ -893,106 +864,88 @@ class MainApp(QMainWindow):
         file_size: Optional[int] = None,
         image_count: Optional[int] = None
     ):
-        """Add a ZIP file to the list."""
+        """添加单个ZIP文件条目"""
         self._add_zip_entries_bulk([(zip_path, members, mod_time, file_size, image_count)])
 
     def _add_zip_entries_bulk(self, entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]]):
-        """Add multiple ZIP files to the list in a batch (more efficient)."""
-        print(f"[DEBUG] Adding {len(entries)} entries in bulk")
+        """批量添加多个ZIP文件条目"""
         if not entries:
-            print("[DEBUG] No entries to add")
             return
 
+        # 处理并获取显示项
         display_items = self._process_entries_for_display(entries)
         
+        # 添加到列表框
         if display_items:
-            print(f"[DEBUG] Adding {len(display_items)} items to listbox")
             for item_text in display_items:
                 item = QListWidgetItem(item_text)
                 self.zip_listbox.addItem(item)
 
-        print("[DEBUG] Refreshing gallery")
+        # 刷新画廊视图
         self._refresh_gallery()
 
-        # Manage selection event connection to avoid duplicates
+        # 管理选择事件连接
         self._manage_zip_selection_connection()
-        print("[DEBUG] Finished adding entries in bulk")
+
+    def _show_error(self, title: str, message: str):
+        """显示错误消息（线程安全）"""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.critical(self, title, message)
 
     def _process_entries_for_display(self, entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]]) -> List[str]:
         """Process entries and prepare them for display."""
         display_items = []
         for zip_path, members, mod_time, file_size, image_count in entries:
+            # Skip if already in zip_files
             if zip_path in self.zip_files:
                 print(f"[DEBUG] Skipping {zip_path}, already in zip_files")
                 continue
 
-            # Resolve entry details
+            # Resolve entry details using helper method
             resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self._resolve_entry_details(
                 zip_path, members, mod_time, file_size, image_count)
 
-            # Check if this is a valid entry (contains images)
-            if not self._is_valid_entry(resolved_members):
-                print(f"[DEBUG] Invalid or empty zip: {zip_path}")
-                # 即使没有图片，我们也应该添加到列表中，只是标记为不含图片
-                # 除非你想完全过滤掉不含图片的压缩包
-                # 这里我们假设目标是显示所有压缩包，但标注哪些包含图片
-                pass
-            else:
-                print(f"[DEBUG] Valid zip with images: {zip_path}")
-
-            # Update image count if needed
+            # Ensure image count is set
             if resolved_image_count is None:
                 resolved_image_count = len(resolved_members) if resolved_members else 0
 
+            # Use provided values or defaults
             entry_mod_time = resolved_mod_time or 0
             entry_file_size = resolved_file_size or 0
 
+            # Store in zip_files dictionary
             self.zip_files[zip_path] = (resolved_members, entry_mod_time, entry_file_size, resolved_image_count)
             print(f"[DEBUG] Added {zip_path} to zip_files with {resolved_image_count} images")
 
-            display_text = self._create_display_text(zip_path, entry_file_size)
+            # Create display text
+            display_text = os.path.basename(zip_path)
+            if entry_file_size:
+                display_text += f" ({_format_size(entry_file_size)})"
             display_items.append(display_text)
             
         return display_items
 
     def _resolve_entry_details(self, zip_path: str, members: Optional[List[str]], mod_time: Optional[float], 
                               file_size: Optional[int], image_count: Optional[int]) -> Tuple[Optional[List[str]], Optional[float], Optional[int], Optional[int]]:
-        """Resolve the details for a ZIP file entry."""
-        resolved_members = members
-        resolved_mod_time = mod_time
-        resolved_file_size = file_size
-        resolved_image_count = image_count
-
-        if resolved_members is None and resolved_image_count is None:
+        """Resolve the details for a ZIP file entry by analyzing if necessary."""
+        # If we need both members and metadata, perform full analysis
+        if members is None and (mod_time is None or file_size is None or image_count is None):
             print(f"[DEBUG] Analyzing zip {zip_path} (full analysis)")
-            is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
-            print(f"[DEBUG] Analysis result - valid: {is_valid}, members count: {len(resolved_members) if resolved_members else 0}, image_count: {resolved_image_count}")
-            # 即使不是有效的图片压缩包，我们也应该返回分析结果，而不是直接返回
-            # 这样可以让调用函数决定如何处理
-        elif resolved_members is None and (resolved_mod_time is None or resolved_file_size is None):
-            # Need complete metadata for display
-            print(f"[DEBUG] Analyzing zip {zip_path} (metadata only)")
-            is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
-            print(f"[DEBUG] Analysis result - valid: {is_valid}")
+            is_valid, analyzed_members, analyzed_mod_time, analyzed_file_size, analyzed_image_count = self.zip_scanner.analyze_zip(zip_path)
+            print(f"[DEBUG] Analysis result - valid: {is_valid}, members count: {len(analyzed_members) if analyzed_members else 0}, image_count: {analyzed_image_count}")
+            return analyzed_members, analyzed_mod_time, analyzed_file_size, analyzed_image_count
+        
+        # If we only need members list but don't have it
+        if members is None:
+            print(f"[DEBUG] Analyzing zip {zip_path} (members only)")
+            is_valid, analyzed_members, _, _, _ = self.zip_scanner.analyze_zip(zip_path)
+            return analyzed_members, mod_time, file_size, image_count
 
-        return resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count
-
-    def _is_valid_entry(self, members: Optional[List[str]]) -> bool:
-        """Check if the entry is valid (has members)."""
-        # 我们总是想显示这个ZIP文件，不管它是否包含图片
-        # 只是会在UI中标记它包含多少图片
-        return True  # 总是返回True，这样所有ZIP文件都会被添加到列表中
-
-    def _create_display_text(self, zip_path: str, file_size: int) -> str:
-        """Create the display text for a ZIP file entry."""
-        display_text = os.path.basename(zip_path)
-        if file_size:
-            display_text += f" ({_format_size(file_size)})"
-        return display_text
+        # Return existing values if no analysis needed
+        return members, mod_time, file_size, image_count
 
     def _manage_zip_selection_connection(self):
         """Manage the ZIP selection event connection to avoid duplicates."""
-        # Disconnect and reconnect selection event to avoid duplicates
         # Use a flag to track connection state instead of relying on exception handling
         if hasattr(self, '_zip_selection_connected') and self._zip_selection_connected:
             self.zip_listbox.itemSelectionChanged.disconnect(self._on_zip_selected)
@@ -1002,18 +955,26 @@ class MainApp(QMainWindow):
 
     def _on_update_status(self, message: str):
         """Update status bar (thread-safe)."""
-        self.status_label.setText(message)
+        if hasattr(self, 'status_label') and self.status_label is not None:
+            self.status_label.setText(message)
 
     def _on_update_preview(self, result_tuple):
         """Update the preview image with aspect ratio scaling."""
+        if not hasattr(self, 'preview_label') or not self.preview_label:
+            return
+            
         pil_image, error_msg = result_tuple
+        
+        # Clear previous content
+        self.preview_label.clear()
+        
         if pil_image and not error_msg:
-            # Convert PIL image to QPixmap
             try:
+                # Convert PIL image to QPixmap
                 qimage = PIL.ImageQt.toqimage(pil_image)
                 pixmap = QPixmap.fromImage(qimage)
                 
-                # Store the pixmap for resizing
+                # Store the pixmap for resizing during window resize
                 self.current_preview_pixmap = pixmap
                 
                 # Scale the pixmap to fit the label while maintaining aspect ratio
@@ -1023,35 +984,48 @@ class MainApp(QMainWindow):
                     Qt.SmoothTransformation
                 )
                 self.preview_label.setPixmap(scaled_pixmap)
-                self.preview_label.setText("")  # Clear text when showing image
+                # No need to set text when displaying image
             except Exception as e:
-                self.preview_label.clear()
-                self.preview_label.setText(f"Error converting image: {str(e)}")
+                error_text = f"Error converting image: {str(e)}"
+                self.preview_label.setText(error_text)
+                print(f"[ERROR] {error_text}")
         else:
-            self.preview_label.clear()
-            self.preview_label.setText(f"Error: {error_msg}" if error_msg else "Preview not available")
+            # Display appropriate error message
+            error_text = f"Error: {error_msg}" if error_msg else "Preview not available"
+            self.preview_label.setText(error_text)
 
     def _on_zip_selected(self):
         """Handle ZIP file selection."""
+        # Reset preview if no items are selected
         selected_items = self.zip_listbox.selectedItems()
         if not selected_items:
             self._reset_preview()
             return
 
+        # Get the selected ZIP file
         item = selected_items[0]
-        index = self.zip_listbox.row(item)
+        current_index = self.zip_listbox.row(item)
         zip_entries = list(self.zip_files.keys())
-        if index >= len(zip_entries):
+        
+        # Validate index
+        if current_index >= len(zip_entries) or current_index < 0:
             self._reset_preview()
             return
 
-        selected_zip = zip_entries[index]
+        # Update current selection
+        selected_zip = zip_entries[current_index]
         self.current_selected_zip = selected_zip
+        
+        # Update details panel
         _, mod_time, file_size, image_count = self.zip_files[selected_zip]
-        self._update_details(selected_zip, mod_time, file_size, image_count)
+        self._update_details_panel(selected_zip, mod_time, file_size, image_count)
 
-        # Load preview for first image if available
-        entry = self.zip_files[selected_zip]
+        # Handle preview loading
+        entry = self.zip_files.get(selected_zip)
+        if not entry:
+            self._reset_preview("Archive data unavailable")
+            return
+            
         members = entry[0]
         if members and len(members) > 0:
             self._load_preview(selected_zip, members, 0)
@@ -1060,18 +1034,26 @@ class MainApp(QMainWindow):
             self._reset_preview("Loading archive contents...")
             self._load_members_for_preview(selected_zip)
 
+        # Update details panel
+        _, mod_time, file_size, image_count = self.zip_files[selected_zip]
+        self._update_details_panel(selected_zip, mod_time, file_size, image_count)
+
     def _on_scan_progress(self, processed: int, total: int):
         """Handle scan progress updates."""
-        if total > 0:
-            progress_percent = (processed / total) * 100
-            self.status_label.setText(f"Scanning... {processed}/{total} ({progress_percent:.1f}%)")
-        else:
-            self.status_label.setText(f"Scanning... {processed} files processed")
+        if hasattr(self, 'status_label') and self.status_label is not None:
+            if total > 0:
+                progress_percent = (processed / total) * 100
+                self.status_label.setText(f"Scanning... {processed}/{total} ({progress_percent:.1f}%)")
+            else:
+                self.status_label.setText(f"Scanning... {processed} files processed")
 
     def _on_scan_completed(self, valid_count: int, total_processed: int):
         """Handle scan completion."""
-        self.status_label.setText(f"Scan completed: {valid_count} valid archives found out of {total_processed} total files")
-        if self.gallery_widget and self.current_view == "gallery":
+        if hasattr(self, 'status_label') and self.status_label is not None:
+            self.status_label.setText(f"Scan completed: {valid_count} valid archives found out of {total_processed} total files")
+            
+        # Refresh gallery view if active
+        if hasattr(self, 'gallery_widget') and self.gallery_widget and self.current_view == "gallery":
             self._refresh_gallery()
 
     def _ensure_members_loaded(self, zip_path: str) -> Optional[List[str]]:
@@ -1084,21 +1066,36 @@ class MainApp(QMainWindow):
         if members is not None:
             return members
 
-        is_valid, members, mod_time, file_size, image_count = self.zip_scanner.analyze_zip(zip_path)
-        if is_valid and members:
-            self.zip_files[zip_path] = (members, mod_time or 0, file_size or 0, len(members))
-            return members
-        return None
+        # Members not loaded yet, perform analysis
+        return self._analyze_and_update_zip_entry(zip_path)
+
+    def _analyze_and_update_zip_entry(self, zip_path: str) -> Optional[List[str]]:
+        """Analyze ZIP file and update its entry in zip_files dictionary."""
+        try:
+            is_valid, members, mod_time, file_size, image_count = self.zip_scanner.analyze_zip(zip_path)
+            if is_valid and members:
+                # Update zip_files with new information
+                self.zip_files[zip_path] = (
+                    members,
+                    mod_time or 0,
+                    file_size or 0,
+                    len(members)
+                )
+                return members
+            return None
+        except Exception as e:
+            print(f"[ERROR] Failed to analyze ZIP file {zip_path}: {e}")
+            return None
 
     def _load_members_for_preview(self, zip_path: str):
         """Load ZIP members in a worker thread and emit results when ready."""
         # Avoid duplicate loading requests
         if zip_path in self._loading_members:
             return
+            
         self._loading_members.add(zip_path)
 
         def task():
-            members = None
             try:
                 members = self._ensure_members_loaded(zip_path)
             except Exception as e:
@@ -1107,6 +1104,7 @@ class MainApp(QMainWindow):
                     "Error",
                     f"Failed to load archive contents for '{Path(zip_path).name}': {e}"
                 )
+                members = None
             finally:
                 self.members_loaded_signal.emit(zip_path, members)
 
@@ -1117,6 +1115,7 @@ class MainApp(QMainWindow):
         # Remove from loading set
         self._loading_members.discard(zip_path)
         
+        # Only process if this is still the currently selected ZIP
         if zip_path != self.current_selected_zip:
             return
 
@@ -1126,80 +1125,114 @@ class MainApp(QMainWindow):
             if entry:
                 _, mod_time, file_size, _ = entry
                 self.zip_files[zip_path] = (members, mod_time, file_size, len(members))
-                self._update_details(zip_path, mod_time, file_size, len(members))
-            self._load_preview(zip_path, members, 0)
+                self._update_details_panel(zip_path, mod_time, file_size, len(members))
+            self._load_preview_image(zip_path, members, 0)
         else:
             self._reset_preview("No images found in archive")
 
-    def _update_details(self, zip_path: str, mod_time: float, file_size: int, image_count: int):
-        """Update the details panel."""
+    def _update_details_panel(self, zip_path: str, mod_time: float, file_size: int, image_count: int):
+        """Update the details panel with archive information."""
+        if not hasattr(self, 'details_content_label') or not self.details_content_label:
+            return
+
+        # Build details text
         if zip_path is None:
             details = "Archive: Unknown\n"
         else:
             details = f"Archive: {os.path.basename(zip_path)}\n"
+        
         details += f"Images: {image_count}\n"
         details += f"Size: {_format_size(file_size)}\n"
+        
         if mod_time:
             from datetime import datetime
             details += f"Modified: {datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')}\n"
 
         self.details_content_label.setText(details)
 
-    def _load_preview(self, zip_path: str, members: List[str], index: int):
-        """Load preview image."""
-        if not self._is_valid_preview_request(members, index):
+    def _load_preview_image(self, zip_path: str, members: List[str], index: int):
+        """Load preview image with proper validation and state management."""
+        # Validate the request
+        if not members or index < 0 or index >= len(members):
             return
 
-        self._cancel_previous_preview_task()
-        self._clear_preview_queue()
-
-        self._update_preview_state(zip_path, members, index)
-        self._update_preview_ui(index, len(members))
-        self._set_preview_loading_message()
-
-        self._submit_preview_task(zip_path, members, index)
-
-        # Use QTimer to periodically check for results
-        self._check_preview_result()
-
-    def _is_valid_preview_request(self, members: List[str], index: int) -> bool:
-        """Check if the preview request is valid."""
-        return members and 0 <= index < len(members)
-
-    def _cancel_previous_preview_task(self):
-        """Cancel the previous preview loading task if it exists."""
+        # Cancel any ongoing preview task
         if self.current_preview_future and not self.current_preview_future.done():
             self.current_preview_future.cancel()
 
-    def _clear_preview_queue(self):
-        """Clear the preview queue."""
-        while True:
-            try:
-                self.preview_queue.get_nowait()
-            except queue.Empty:
-                break
+        # Clear the preview queue
+        self._clear_preview_result_queue()
 
-    def _update_preview_state(self, zip_path: str, members: List[str], index: int):
-        """Update the preview state variables."""
+        # Update preview state
         self.current_preview_index = index
         self.current_preview_members = members
-        cache_key = (zip_path, members[index])
-        self.current_preview_cache_key = cache_key
+        self.current_preview_cache_key = (zip_path, members[index])
 
-    def _update_preview_ui(self, index: int, members_count: int):
-        """Update the preview UI elements."""
-        # Update preview info label
-        self.preview_info_label.setText(f"Image {index + 1} / {members_count}")
+        # Update UI elements
+        self._update_preview_ui_elements(index, len(members))
 
-        # Update navigation button states
-        self.preview_prev_button.setEnabled(index > 0)
-        self.preview_next_button.setEnabled(index < members_count - 1)
-
-    def _set_preview_loading_message(self):
-        """Set the loading message for the preview."""
-        # Clear the pixmap and show loading message
+        # Set loading message
         self.preview_label.clear()
         self.preview_label.setText("Loading preview...")
+
+        # Submit the preview loading task
+        target_size = (
+            CONFIG["PERFORMANCE_THUMBNAIL_SIZE"] if self.app_settings['performance_mode']
+            else CONFIG["THUMBNAIL_SIZE"]
+        )
+
+        self.current_preview_future = self.thread_pool.submit(
+            load_image_data_async,
+            zip_path,
+            members[index],
+            self.app_settings['max_thumbnail_size'],
+            target_size,
+            self.preview_queue,
+            self.cache,
+            (zip_path, members[index]),
+            self.zip_manager,
+            self.app_settings['performance_mode']
+        )
+
+        # Start checking for results
+        self._check_preview_result()
+
+    def _clear_preview_result_queue(self):
+        """Clear all items from the preview result queue."""
+        try:
+            while True:
+                self.preview_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    def _update_preview_ui_elements(self, index: int, total_count: int):
+        """Update preview navigation UI elements."""
+        # Update info label
+        self.preview_info_label.setText(f"Image {index + 1} / {total_count}")
+
+        # Update navigation buttons
+        self.preview_prev_button.setEnabled(index > 0)
+        self.preview_next_button.setEnabled(index < total_count - 1)
+
+    def _submit_preview_task(self, zip_path: str, members: List[str], index: int):
+        """Submit the preview loading task to the thread pool."""
+        target_size = (
+            CONFIG["PERFORMANCE_THUMBNAIL_SIZE"] if self.app_settings['performance_mode']
+            else CONFIG["THUMBNAIL_SIZE"]
+        )
+
+        self.current_preview_future = self.thread_pool.submit(
+            load_image_data_async,
+            zip_path,
+            members[index],
+            self.app_settings['max_thumbnail_size'],
+            target_size,
+            self.preview_queue,
+            self.cache,
+            (zip_path, members[index]),  # cache_key
+            self.zip_manager,
+            self.app_settings['performance_mode']
+        )
 
     def _submit_preview_task(self, zip_path: str, members: List[str], index: int):
         """Submit the preview loading task to the thread pool."""
@@ -1247,25 +1280,33 @@ class MainApp(QMainWindow):
                 QTimer.singleShot(20, self._check_preview_result)
 
     def _reset_preview(self, message: str = "Select a ZIP file"):
+        """Reset the preview panel and clear any ongoing operations."""
+        # Cancel any ongoing preview task
         if self.current_preview_future and not self.current_preview_future.done():
             self.current_preview_future.cancel()
         self.current_preview_future = None
+        
+        # Clear preview state
         self.current_preview_members = None
         self.current_preview_index = None
         self.current_preview_cache_key = None
 
         # Drain any pending preview results
-        while True:
-            try:
-                self.preview_queue.get_nowait()
-            except queue.Empty:
-                break
+        self._clear_preview_result_queue()
 
+        # Reset UI elements
         self.preview_label.clear()
         self.preview_label.setText(message)
         self.preview_info_label.setText('')
         self.preview_prev_button.setEnabled(False)
         self.preview_next_button.setEnabled(False)
+
+    def _load_preview(self, zip_path: str, members: List[str], index: int):
+        """Load preview for given ZIP file, members and index."""
+        if not members or index < 0 or index >= len(members):
+            return
+            
+        self._load_preview_image(zip_path, members, index)
 
     def _on_preview_click(self, event):
         """Handle preview click to open slide view."""
@@ -1284,6 +1325,27 @@ class MainApp(QMainWindow):
         current_index = self.current_preview_index or 0
         if current_index + 1 < len(self.current_preview_members):
             self._load_preview(self.current_selected_zip, self.current_preview_members, current_index + 1)
+
+    def _switch_to_slide_view(self, zip_path: str, members: List[str], index: int, previous_view: str):
+        """Private helper to switch to slide view with given context.
+        
+        Args:
+            zip_path: Path to the ZIP file
+            members: List of member names in the ZIP
+            index: Current image index
+            previous_view: The view that initiated the transition ("explorer" or "gallery")
+        """
+        # Set context for slide view
+        self.slide_view_context = {
+            "zip_path": zip_path,
+            "members": members,
+            "current_index": index,
+            "previous_view": previous_view
+        }
+
+        # Populate slide widget and switch to slide view
+        self.slide_widget.populate(zip_path, members, index)
+        self._switch_view("slide")
 
     def _open_slide_view(self):
         """Open the slide view for the currently selected ZIP file."""
@@ -1307,31 +1369,11 @@ class MainApp(QMainWindow):
                 QMessageBox.critical(self, "Error", "Unable to load archive contents.")
                 return
 
-        # Set context for slide view
-        self.slide_view_context = {
-            "zip_path": zip_path,
-            "members": members,
-            "current_index": self.current_preview_index or 0,
-            "previous_view": "explorer"
-        }
-
-        # Populate slide widget and switch to slide view
-        self.slide_widget.populate(zip_path, members, self.current_preview_index or 0)
-        self._switch_view("slide")
+        self._switch_to_slide_view(zip_path, members, self.current_preview_index or 0, "explorer")
 
     def _open_viewer_from_gallery(self, zip_path: str, members: List[str], index: int):
         """Open slide view when triggered from gallery view."""
-        # Set context for slide view
-        self.slide_view_context = {
-            "zip_path": zip_path,
-            "members": members,
-            "current_index": index,
-            "previous_view": "gallery"
-        }
-
-        # Populate slide widget and switch to slide view
-        self.slide_widget.populate(zip_path, members, index)
-        self._switch_view("slide")
+        self._switch_to_slide_view(zip_path, members, index, "gallery")
 
     def _on_gallery_selection(self, zip_path: str, members: List[str], index: int):
         """Handle selection change in gallery view."""
@@ -1342,27 +1384,41 @@ class MainApp(QMainWindow):
         entry = self.zip_files.get(zip_path)
         if entry:
             _, mod_time, file_size, image_count = entry
-            self._update_details(zip_path, mod_time, file_size, image_count)
+            self._update_details_panel(zip_path, mod_time, file_size, image_count)
 
-    def _show_settings(self):
-        """Show settings dialog."""
-        dialog = SettingsDialog(self, self.app_settings)
-        dialog.exec()
-
-        if self.app_settings.get('performance_mode'):
-            new_capacity = CONFIG["CACHE_MAX_ITEMS_PERFORMANCE"]
-        else:
-            new_capacity = CONFIG["CACHE_MAX_ITEMS_NORMAL"]
-
+    def _update_cache_capacity(self):
+        """Update cache capacity based on current performance mode setting."""
+        new_capacity = (
+            CONFIG["CACHE_MAX_ITEMS_PERFORMANCE"] 
+            if self.app_settings.get('performance_mode') 
+            else CONFIG["CACHE_MAX_ITEMS_NORMAL"]
+        )
         self.cache.resize(new_capacity)
 
+    def _show_settings(self):
+        """Show settings dialog and update application settings."""
+        dialog = SettingsDialog(self, self.app_settings)
+        dialog.exec()
+        
+        # Update cache capacity based on new performance mode setting
+        self._update_cache_capacity()
+
     def _clear_list(self):
-        """Clear the ZIP file list."""
+        """Clear all loaded ZIP files and reset UI state."""
+        # Clear UI components
         self.zip_listbox.clear()
+        
+        # Clear data structures
         self.zip_files.clear()
         self.current_selected_zip = None
-        self._reset_preview()
+        
+        # Reset preview and details
+        self._reset_preview("No archives loaded")
         self.details_content_label.setText("")
+        
+        # Refresh views
+        if self.gallery_widget:
+            self.gallery_widget.clear()
 
     def _show_about(self):
         """Show about dialog."""
@@ -1399,27 +1455,39 @@ BSD-2-Clause License"""
         self.scan_progress.emit(processed, total)
 
     def closeEvent(self, event):
-        """Handle application closing."""
+        """Handle application closing with proper resource cleanup."""
+        # Signal scan thread to stop
         self.scan_stop_event.set()
-        self.zip_manager.close_all()
-        # Stop the thumbnail loader thread
-        if hasattr(self, 'thumbnail_loader'):
-            self.thumbnail_loader.stop()
-        self.thread_pool.shutdown(wait=False)
         
-        # Clean up slide widget if it exists
+        # Close all zip file handles
+        self.zip_manager.close_all()
+        
+        # Stop thumbnail loader thread
+        if hasattr(self, 'thumbnail_loader') and self.thumbnail_loader:
+            self.thumbnail_loader.stop()
+        
+        # Shutdown thread pool gracefully
+        if hasattr(self, 'thread_pool'):
+            self.thread_pool.shutdown(wait=True)
+        
+        # Clean up slide widget
         if hasattr(self, 'slide_widget') and self.slide_widget:
-            # Make sure any running threads in slide widget are stopped
-            pass
-            
+            self.slide_widget.cleanup()
+        
+        # Accept the close event
         event.accept()
 
     def resizeEvent(self, event):
-        """Handle window resize events to rescale preview image."""
+        """Handle window resize events to rescale preview image while maintaining aspect ratio."""
         super().resizeEvent(event)
+        
         # Rescale the preview image when the window is resized
-        if hasattr(self, 'current_preview_pixmap') and self.current_preview_pixmap:
+        if (hasattr(self, 'current_preview_pixmap') and 
+            self.current_preview_pixmap and 
+            hasattr(self, 'preview_label')):
+            
             try:
+                # Scale pixmap to fit label while maintaining aspect ratio
                 scaled_pixmap = self.current_preview_pixmap.scaled(
                     self.preview_label.size(),
                     Qt.KeepAspectRatio,
