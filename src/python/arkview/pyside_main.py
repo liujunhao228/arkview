@@ -41,6 +41,7 @@ from .pyside_ui import (
     SettingsDialog, ImageViewerWindow, SlideView
 )
 from .pyside_gallery import GalleryView
+from .pyside_views import ViewManager, ExplorerView
 
 
 CONFIG: Dict[str, Any] = {
@@ -164,6 +165,8 @@ class MainApp(QMainWindow):
         self.gallery_widget: Optional[GalleryView] = None
         self.slide_widget: Optional[SlideView] = None
         self._zip_selection_connected = False  # Track connection state of zip selection signal
+        self.explorer_view: Optional[ExplorerView] = None
+        self.view_manager: Optional[ViewManager] = None
 
         # Set up the UI
         self._setup_ui()
@@ -292,185 +295,34 @@ class MainApp(QMainWindow):
 
     def _setup_ui(self):
         """Setup the main UI."""
-        # Create central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Main layout
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
-        # View switcher at the top
+        # === Setup View Switcher ===
         view_switch_frame = QFrame()
         view_switch_frame.setFixedHeight(40)
         view_switch_frame.setStyleSheet("background-color: #2c323c; border: none;")
-        view_switch_layout = QHBoxLayout(view_switch_frame)
-        view_switch_layout.setContentsMargins(8, 5, 8, 5)
-        view_switch_layout.setSpacing(10)
-        
-        view_label = QLabel("View:")
-        view_label.setStyleSheet("font-weight: bold; color: #e8eaed; font-size: 10pt;")
-        view_switch_layout.addWidget(view_label)
-        
-        self.explorer_view_button = QPushButton("📋 Resource Explorer")
-        self.explorer_view_button.setObjectName("primary")
-        self.explorer_view_button.setFixedWidth(180)
-        self.explorer_view_button.clicked.connect(lambda: self._switch_view("explorer"))
-        view_switch_layout.addWidget(self.explorer_view_button)
-        
-        self.gallery_view_button = QPushButton("🎞️ Gallery")
-        self.gallery_view_button.setObjectName("secondary")
-        self.gallery_view_button.setFixedWidth(150)
-        self.gallery_view_button.clicked.connect(lambda: self._switch_view("gallery"))
-        view_switch_layout.addWidget(self.gallery_view_button)
-        
-        view_switch_layout.addStretch()
+        self._setup_view_switcher(view_switch_frame)
         main_layout.addWidget(view_switch_frame)
         
-        # Container for switchable views
+        # === Setup Views Container ===
         self.views_container = QFrame()
-        views_layout = QVBoxLayout(self.views_container)
-        views_layout.setContentsMargins(0, 0, 0, 0)
+        self.view_manager = ViewManager(self.views_container)
         
-        # === RESOURCE EXPLORER VIEW ===
-        self.explorer_view_frame = QFrame()
-        explorer_layout = QHBoxLayout(self.explorer_view_frame)
-        explorer_layout.setContentsMargins(8, 8, 8, 8)
+        # Create and register explorer view
+        self.explorer_view = ExplorerView(lambda: self.zip_files)
+        self.view_manager.register_view(self.explorer_view)
         
-        # Main splitter
-        self.main_splitter = QSplitter(Qt.Horizontal)
-        
-        # --- Left Panel: ZIP File List ---
-        left_frame = QFrame()
-        left_layout = QVBoxLayout(left_frame)
-        left_layout.setContentsMargins(5, 5, 5, 5)
-        
-        left_label = QLabel("📦 Archives")
-        left_label.setStyleSheet("font-weight: bold; color: #e8eaed; font-size: 11pt;")
-        left_layout.addWidget(left_label)
-        
-        # List container
-        list_container = QFrame()
-        list_layout = QHBoxLayout(list_container)
-        list_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.zip_listbox = QListWidget()
-        self.zip_listbox.setStyleSheet("""
-            QListWidget {
-                background-color: #1f222a;
-                border: 1px solid #2c323c;
-                color: #e8eaed;
-                selection-background-color: #00bc8c;
-                selection-color: #101214;
-                font: 10pt "Segoe UI";
-            }
-        """)
-        list_layout.addWidget(self.zip_listbox)
-        
-        # Add scrollbar manually to maintain control
-        list_scrollbar = QScrollBar()
-        self.zip_listbox.setVerticalScrollBar(list_scrollbar)
-        list_layout.addWidget(list_scrollbar)
-        
-        left_layout.addWidget(list_container)
-        
-        # Add left frame to splitter
-        self.main_splitter.addWidget(left_frame)
-        
-        # --- Right Panel: Preview and Details ---
-        right_frame = QFrame()
-        right_layout = QVBoxLayout(right_frame)
-        right_layout.setContentsMargins(5, 5, 5, 5)
-        
-        right_label = QLabel("🖼️  Preview")
-        right_label.setStyleSheet("font-weight: bold; color: #e8eaed; font-size: 11pt;")
-        right_layout.addWidget(right_label)
-        
-        # Preview navigation controls
-        preview_nav_frame = QFrame()
-        preview_nav_layout = QHBoxLayout(preview_nav_frame)
-        preview_nav_layout.setContentsMargins(0, 0, 0, 8)
-        
-        self.preview_prev_button = QPushButton("◀ Prev")
-        self.preview_prev_button.setFixedWidth(100)
-        self.preview_prev_button.clicked.connect(self._preview_prev)
-        self.preview_prev_button.setEnabled(False)
-        preview_nav_layout.addWidget(self.preview_prev_button)
-        
-        self.preview_info_label = QLabel("")
-        self.preview_info_label.setAlignment(Qt.AlignCenter)
-        self.preview_info_label.setStyleSheet("font-size: 9pt;")
-        preview_nav_layout.addWidget(self.preview_info_label)
-        
-        self.preview_next_button = QPushButton("Next ▶")
-        self.preview_next_button.setFixedWidth(100)
-        self.preview_next_button.clicked.connect(self._preview_next)
-        self.preview_next_button.setEnabled(False)
-        preview_nav_layout.addWidget(self.preview_next_button)
-        
-        right_layout.addWidget(preview_nav_frame)
-        
-        # Preview container
-        preview_container = QFrame()
-        preview_container.setFrameStyle(QFrame.StyledPanel)
-        preview_container.setStyleSheet("background-color: #2a2d2e; border: 1px solid #3a3f4b;")
-        preview_container.setMinimumHeight(300)  # Increase minimum height for better proportion
-        
-        preview_container_layout = QVBoxLayout(preview_container)
-        preview_container_layout.setContentsMargins(2, 2, 2, 2)
-        
-        self.preview_label = QLabel()
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setStyleSheet("""
-            QLabel {
-                background-color: #2a2d2e;
-                color: #ffffff;
-                font: 10pt;
-            }
-        """)
-        self.preview_label.setText("Select a ZIP file")
-        self.preview_label.mousePressEvent = self._on_preview_click
-        self.preview_label.setScaledContents(False)  # Change to False for aspect ratio scaling
-        self.preview_label.setMinimumSize(1, 1)
-        preview_container_layout.addWidget(self.preview_label)
-        
-        right_layout.addWidget(preview_container)
-        
-        # Details panel
-        details_frame = QGroupBox("ℹ️  Details")
-        details_layout = QVBoxLayout(details_frame)
-        
-        self.details_text = QScrollArea()
-        self.details_text.setMinimumHeight(200)  # Increase minimum height
-        self.details_text.setWidgetResizable(True)
-        self.details_widget = QWidget()
-        self.details_layout = QVBoxLayout(self.details_widget)
-        self.details_text.setWidget(self.details_widget)
-        
-        self.details_content_label = QLabel()
-        self.details_content_label.setWordWrap(True)
-        self.details_layout.addWidget(self.details_content_label)
-        
-        details_layout.addWidget(self.details_text)
-        
-        right_layout.addWidget(details_frame)
-        
-        # Add right frame to splitter
-        self.main_splitter.addWidget(right_frame)
-        
-        # Set splitter weights - give more space to the preview panel
-        self.main_splitter.setStretchFactor(0, 2)  # Left panel
-        self.main_splitter.setStretchFactor(1, 3)  # Right panel
-        
-        explorer_layout.addWidget(self.main_splitter)
-        
-        # === GALLERY VIEW ===
-        self.gallery_view_frame = QFrame()
-        gallery_layout = QVBoxLayout(self.gallery_view_frame)
-        
+        # Create and register gallery view frame and widget
+        gallery_view_frame = QFrame()
+        self.gallery_view_frame = gallery_view_frame
+        gallery_layout = QVBoxLayout(gallery_view_frame)
         self.gallery_widget = GalleryView(
-            self.gallery_view_frame,
+            gallery_view_frame,
             self.zip_files,
             self.app_settings,
             self.cache,
@@ -483,12 +335,12 @@ class MainApp(QMainWindow):
         )
         gallery_layout.addWidget(self.gallery_widget)
         
-        # === SLIDE VIEW ===
-        self.slide_view_frame = QFrame()
-        slide_layout = QVBoxLayout(self.slide_view_frame)
-        
+        # Create and register slide view frame and widget
+        slide_view_frame = QFrame()
+        self.slide_view_frame = slide_view_frame
+        slide_layout = QVBoxLayout(slide_view_frame)
         self.slide_widget = SlideView(
-            self.slide_view_frame,
+            slide_view_frame,
             self.zip_files,
             self.app_settings,
             self.cache,
@@ -499,21 +351,93 @@ class MainApp(QMainWindow):
         )
         slide_layout.addWidget(self.slide_widget)
         
-        # Add all views to container
-        views_layout.addWidget(self.explorer_view_frame)
-        views_layout.addWidget(self.gallery_view_frame)
-        views_layout.addWidget(self.slide_view_frame)
+        # Add gallery and slide views to container
+        views_layout = self.view_manager.container_layout
+        views_layout.addWidget(gallery_view_frame)
+        views_layout.addWidget(slide_view_frame)
+        
+        # Connect view switch callbacks
+        self.view_manager.on_view_switched(self._on_view_switched)
         
         main_layout.addWidget(self.views_container)
         
-        # --- Bottom Control Panel ---
+        # === Setup Bottom Control Panel ===
         bottom_frame = QFrame()
         bottom_frame.setFixedHeight(40)
         bottom_frame.setStyleSheet("background-color: #2c323c; border: none;")
-        bottom_layout = QHBoxLayout(bottom_frame)
+        self._setup_bottom_panel(bottom_frame)
+        main_layout.addWidget(bottom_frame)
+        
+        # Initialize with explorer view
+        self.view_manager.switch_to_view("explorer")
+        self._update_view_buttons()
+        
+        # Create convenience references to explorer view components for backward compatibility
+        self._setup_explorer_view_references()
+    
+    def _setup_explorer_view_references(self):
+        """Setup convenience references to explorer view components for backward compatibility."""
+        if self.explorer_view:
+            # Create references to explorer view components
+            self.zip_listbox = self.explorer_view.zip_listbox
+            self.preview_label = self.explorer_view.preview_label
+            self.preview_prev_button = self.explorer_view.preview_prev_button
+            self.preview_next_button = self.explorer_view.preview_next_button
+            self.preview_info_label = self.explorer_view.preview_info_label
+            self.details_content_label = self.explorer_view.details_content_label
+            self.details_text = self.explorer_view.details_text
+            self.details_layout = self.explorer_view.details_layout
+            self.details_widget = self.explorer_view.details_widget
+            self.main_splitter = self.explorer_view.main_splitter
+            self.explorer_view_frame = self.explorer_view.frame
+            
+            # Connect button signals
+            self.preview_prev_button.clicked.connect(self._preview_prev)
+            self.preview_next_button.clicked.connect(self._preview_next)
+            
+            # Connect preview label mouse click event
+            self.preview_label.mousePressEvent = self._on_preview_click
+            
+            # Connect list selection signal
+            self.zip_listbox.itemSelectionChanged.connect(self._on_zip_selected_initial)
+    
+    def _on_zip_selected_initial(self):
+        """Initial connection handler for zip selection (called once to setup connection)."""
+        if not self._zip_selection_connected:
+            self.zip_listbox.itemSelectionChanged.disconnect(self._on_zip_selected_initial)
+            self.zip_listbox.itemSelectionChanged.connect(self._on_zip_selected)
+            self._zip_selection_connected = True
+        self._on_zip_selected()
+    
+    def _setup_view_switcher(self, parent_frame: QFrame):
+        """Setup the view switcher buttons at the top."""
+        layout = QHBoxLayout(parent_frame)
+        layout.setContentsMargins(8, 5, 8, 5)
+        layout.setSpacing(10)
+        
+        view_label = QLabel("View:")
+        view_label.setStyleSheet("font-weight: bold; color: #e8eaed; font-size: 10pt;")
+        layout.addWidget(view_label)
+        
+        self.explorer_view_button = QPushButton("📋 Resource Explorer")
+        self.explorer_view_button.setObjectName("primary")
+        self.explorer_view_button.setFixedWidth(180)
+        self.explorer_view_button.clicked.connect(lambda: self.view_manager.switch_to_view("explorer"))
+        layout.addWidget(self.explorer_view_button)
+        
+        self.gallery_view_button = QPushButton("🎞️ Gallery")
+        self.gallery_view_button.setObjectName("secondary")
+        self.gallery_view_button.setFixedWidth(150)
+        self.gallery_view_button.clicked.connect(lambda: self.view_manager.switch_to_view("gallery"))
+        layout.addWidget(self.gallery_view_button)
+        
+        layout.addStretch()
+    
+    def _setup_bottom_panel(self, parent_frame: QFrame):
+        """Setup the bottom control panel."""
+        bottom_layout = QHBoxLayout(parent_frame)
         bottom_layout.setContentsMargins(8, 5, 8, 5)
         
-        # Buttons container
         button_container = QFrame()
         button_layout = QHBoxLayout(button_container)
         button_layout.setSpacing(5)
@@ -528,7 +452,7 @@ class MainApp(QMainWindow):
         view_button = QPushButton("👁️ View")
         view_button.setObjectName("success")
         view_button.setFixedWidth(80)
-        view_button.clicked.connect(self._open_slide_view)  # Changed from _open_viewer to _open_slide_view
+        view_button.clicked.connect(self._open_slide_view)
         button_layout.addWidget(view_button)
         
         clear_button = QPushButton("🗑️ Clear")
@@ -543,7 +467,6 @@ class MainApp(QMainWindow):
         
         bottom_layout.addWidget(button_container)
         
-        # Status container
         status_container = QFrame()
         status_layout = QHBoxLayout(status_container)
         status_layout.setContentsMargins(0, 0, 0, 0)
@@ -554,12 +477,6 @@ class MainApp(QMainWindow):
         status_layout.addWidget(self.status_label)
         
         bottom_layout.addWidget(status_container, stretch=1)
-        
-        main_layout.addWidget(bottom_frame)
-        
-        # Initialize visibility
-        self._update_view_buttons()
-        self._update_view_visibility()
 
     def _setup_menu(self):
         """Setup the menu bar."""
@@ -624,8 +541,19 @@ class MainApp(QMainWindow):
         # Forward to gallery widget
         self.gallery_widget.handle_keypress(direction)
 
+    def _on_view_switched(self, previous_view_id: str, current_view_id: str):
+        """Callback when view is switched via ViewManager."""
+        self.current_view = current_view_id
+        self._update_view_buttons()
+        
+        # Update visibility for frames that are not managed by ViewManager yet
+        if current_view_id == "gallery" and self.gallery_widget:
+            self.gallery_widget.populate()
+        elif current_view_id == "slide" and self.slide_widget:
+            pass
+
     def _switch_view(self, view: str):
-        """Switch between explorer and gallery views."""
+        """Switch between explorer and gallery views (legacy method)."""
         if view not in ["explorer", "gallery", "slide"]:
             return
 
@@ -691,16 +619,22 @@ class MainApp(QMainWindow):
 
     def _update_view_visibility(self):
         """Update view visibility based on current view."""
-        self.explorer_view_frame.hide()
-        self.gallery_view_frame.hide()
-        self.slide_view_frame.hide()
+        if self.explorer_view and self.explorer_view.frame:
+            self.explorer_view.frame.hide()
+        if hasattr(self, 'gallery_view_frame'):
+            self.gallery_view_frame.hide()
+        if hasattr(self, 'slide_view_frame'):
+            self.slide_view_frame.hide()
         
         if self.current_view == "explorer":
-            self.explorer_view_frame.show()
+            if self.explorer_view and self.explorer_view.frame:
+                self.explorer_view.frame.show()
         elif self.current_view == "gallery":
-            self.gallery_view_frame.show()
+            if hasattr(self, 'gallery_view_frame'):
+                self.gallery_view_frame.show()
         elif self.current_view == "slide":
-            self.slide_view_frame.show()
+            if hasattr(self, 'slide_view_frame'):
+                self.slide_view_frame.show()
 
     def _refresh_gallery(self):
         """Refresh gallery view if visible."""
