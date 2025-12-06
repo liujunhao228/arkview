@@ -11,7 +11,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QSplitter, QScrollArea,
@@ -113,6 +113,7 @@ class MainApp(QMainWindow):
     update_status = Signal(str)
     update_preview = Signal(object)  # (pil_image, str_error)
     add_zip_entries_signal = Signal(list)  # List of tuples for bulk adding
+    members_loaded_signal = Signal(str, object)  # zip_path, members list
     show_error_signal = Signal(str, str)  # (title, message)
     scan_progress = Signal(int, int)  # processed, total
     scan_completed = Signal(int, int)  # valid_count, total_processed
@@ -148,6 +149,7 @@ class MainApp(QMainWindow):
         self.current_preview_members: Optional[List[str]] = None
         self.current_preview_cache_key: Optional[Tuple[str, str]] = None
         self.current_preview_future = None
+        self._loading_members: Set[str] = set()
 
         self.scan_thread = None
         self.scan_stop_event = threading.Event()
@@ -165,6 +167,7 @@ class MainApp(QMainWindow):
         self.update_status.connect(self._on_update_status)
         self.update_preview.connect(self._on_update_preview)
         self.add_zip_entries_signal.connect(self._add_zip_entries_bulk)
+        self.members_loaded_signal.connect(self._on_members_loaded)
         self.show_error_signal.connect(self._show_error)
         self.scan_progress.connect(self._on_scan_progress)
         self.scan_completed.connect(self._on_scan_completed)
@@ -867,10 +870,16 @@ class MainApp(QMainWindow):
         """Update preview (thread-safe)."""
         pil_image, error_msg = result_tuple
         if pil_image and not error_msg:
-            # Convert PIL image to QPixmap
-            qimage = PIL.ImageQt.toqpixmap(pil_image)
-            self.preview_label.setPixmap(qimage)
-            self.preview_label.setText("")  # Clear text when showing image
+            # Convert PIL image to QPixmap using the proper method
+            try:
+                qimage = PIL.ImageQt.ImageQt(pil_image)
+                pixmap = QPixmap.fromImage(qimage)
+                self.preview_label.setPixmap(pixmap)
+                self.preview_label.setText("")  # Clear text when showing image
+            except Exception as e:
+                print(f"Error converting image to pixmap: {e}")
+                self.preview_label.clear()
+                self.preview_label.setText(f"Error displaying image")
         else:
             self.preview_label.clear()
             self.preview_label.setText(f"Error: {error_msg}" if error_msg else "Select a ZIP file")
@@ -901,8 +910,8 @@ class MainApp(QMainWindow):
             self._load_preview(selected_zip, members, 0)
         else:
             # Load members in background if not loaded yet
-            self.thread_pool.submit(self._ensure_members_loaded, selected_zip)
             self._reset_preview("Loading archive contents...")
+            self._load_members_for_preview(selected_zip)
 
     def _on_scan_progress(self, processed: int, total: int):
         """Handle scan progress updates."""
@@ -933,6 +942,47 @@ class MainApp(QMainWindow):
             self.zip_files[zip_path] = (members, mod_time or 0, file_size or 0, len(members))
             return members
         return None
+
+    def _load_members_for_preview(self, zip_path: str):
+        """Load ZIP members in a worker thread and emit results when ready."""
+        # Avoid duplicate loading requests
+        if zip_path in self._loading_members:
+            return
+        self._loading_members.add(zip_path)
+
+        def task():
+            members = None
+            try:
+                members = self._ensure_members_loaded(zip_path)
+            except Exception as e:
+                # Emit error signal if loading fails
+                self.show_error_signal.emit(
+                    "Error",
+                    f"Failed to load archive contents for '{Path(zip_path).name}': {e}"
+                )
+            finally:
+                self.members_loaded_signal.emit(zip_path, members)
+
+        self.thread_pool.submit(task)
+
+    def _on_members_loaded(self, zip_path: str, members: Optional[List[str]]):
+        """Handle members loaded signal (thread-safe)."""
+        # Remove from loading set
+        self._loading_members.discard(zip_path)
+        
+        if zip_path != self.current_selected_zip:
+            return
+
+        if members and len(members) > 0:
+            # Update details with fresh member count
+            entry = self.zip_files.get(zip_path)
+            if entry:
+                _, mod_time, file_size, _ = entry
+                self.zip_files[zip_path] = (members, mod_time, file_size, len(members))
+                self._update_details(zip_path, mod_time, file_size, len(members))
+            self._load_preview(zip_path, members, 0)
+        else:
+            self._reset_preview("No images found in archive")
 
     def _update_details(self, zip_path: str, mod_time: float, file_size: int, image_count: int):
         """Update the details panel."""
@@ -980,8 +1030,9 @@ class MainApp(QMainWindow):
             else CONFIG["THUMBNAIL_SIZE"]
         )
 
-        self.preview_label.setText("Loading preview...")
+        # Clear the pixmap and show loading message
         self.preview_label.clear()
+        self.preview_label.setText("Loading preview...")
 
         self.current_preview_future = self.thread_pool.submit(
             load_image_data_async,
