@@ -293,15 +293,33 @@ class MainApp(QMainWindow):
     def _setup_ui(self):
         """Setup the main UI."""
         # Create central widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
+        self._create_central_widget()
         
         # Main layout
-        main_layout = QVBoxLayout(central_widget)
+        main_layout = QVBoxLayout(self.central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
         # View switcher at the top
+        self._setup_view_switcher(main_layout)
+        
+        # Container for switchable views
+        self._setup_views_container(main_layout)
+        
+        # Bottom control panel
+        self._setup_bottom_panel(main_layout)
+        
+        # Initialize visibility
+        self._update_view_buttons()
+        self._update_view_visibility()
+
+    def _create_central_widget(self):
+        """Create and set the central widget."""
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+
+    def _setup_view_switcher(self, main_layout: QVBoxLayout):
+        """Setup the view switcher at the top of the UI."""
         view_switch_frame = QFrame()
         view_switch_frame.setFixedHeight(40)
         view_switch_frame.setStyleSheet("background-color: #2c323c; border: none;")
@@ -327,13 +345,31 @@ class MainApp(QMainWindow):
         
         view_switch_layout.addStretch()
         main_layout.addWidget(view_switch_frame)
-        
-        # Container for switchable views
+
+    def _setup_views_container(self, main_layout: QVBoxLayout):
+        """Setup the container for switchable views."""
         self.views_container = QFrame()
         views_layout = QVBoxLayout(self.views_container)
         views_layout.setContentsMargins(0, 0, 0, 0)
         
         # === RESOURCE EXPLORER VIEW ===
+        self._setup_explorer_view(views_layout)
+        
+        # === GALLERY VIEW ===
+        self._setup_gallery_view(views_layout)
+        
+        # === SLIDE VIEW ===
+        self._setup_slide_view(views_layout)
+        
+        # Add all views to container
+        views_layout.addWidget(self.explorer_view_frame)
+        views_layout.addWidget(self.gallery_view_frame)
+        views_layout.addWidget(self.slide_view_frame)
+        
+        main_layout.addWidget(self.views_container)
+
+    def _setup_explorer_view(self, views_layout: QVBoxLayout):
+        """Setup the resource explorer view."""
         self.explorer_view_frame = QFrame()
         explorer_layout = QHBoxLayout(self.explorer_view_frame)
         explorer_layout.setContentsMargins(8, 8, 8, 8)
@@ -342,8 +378,25 @@ class MainApp(QMainWindow):
         self.main_splitter = QSplitter(Qt.Horizontal)
         
         # --- Left Panel: ZIP File List ---
-        left_frame = QFrame()
-        left_layout = QVBoxLayout(left_frame)
+        self._setup_left_panel()
+        
+        # --- Right Panel: Preview and Details ---
+        self._setup_right_panel()
+        
+        # Add frames to splitter
+        self.main_splitter.addWidget(self.left_frame)
+        self.main_splitter.addWidget(self.right_frame)
+        
+        # Set splitter weights - give more space to the preview panel
+        self.main_splitter.setStretchFactor(0, 2)  # Left panel
+        self.main_splitter.setStretchFactor(1, 3)  # Right panel
+        
+        explorer_layout.addWidget(self.main_splitter)
+
+    def _setup_left_panel(self):
+        """Setup the left panel containing the ZIP file list."""
+        self.left_frame = QFrame()
+        left_layout = QVBoxLayout(self.left_frame)
         left_layout.setContentsMargins(5, 5, 5, 5)
         
         left_label = QLabel("📦 Archives")
@@ -374,13 +427,11 @@ class MainApp(QMainWindow):
         list_layout.addWidget(list_scrollbar)
         
         left_layout.addWidget(list_container)
-        
-        # Add left frame to splitter
-        self.main_splitter.addWidget(left_frame)
-        
-        # --- Right Panel: Preview and Details ---
-        right_frame = QFrame()
-        right_layout = QVBoxLayout(right_frame)
+
+    def _setup_right_panel(self):
+        """Setup the right panel containing preview and details."""
+        self.right_frame = QFrame()
+        right_layout = QVBoxLayout(self.right_frame)
         right_layout.setContentsMargins(5, 5, 5, 5)
         
         right_label = QLabel("🖼️  Preview")
@@ -388,6 +439,16 @@ class MainApp(QMainWindow):
         right_layout.addWidget(right_label)
         
         # Preview navigation controls
+        self._setup_preview_navigation(right_layout)
+        
+        # Preview container
+        self._setup_preview_container(right_layout)
+        
+        # Details panel
+        self._setup_details_panel(right_layout)
+
+    def _setup_preview_navigation(self, right_layout: QVBoxLayout):
+        """Setup the preview navigation controls."""
         preview_nav_frame = QFrame()
         preview_nav_layout = QHBoxLayout(preview_nav_frame)
         preview_nav_layout.setContentsMargins(0, 0, 0, 8)
@@ -410,8 +471,9 @@ class MainApp(QMainWindow):
         preview_nav_layout.addWidget(self.preview_next_button)
         
         right_layout.addWidget(preview_nav_frame)
-        
-        # Preview container
+
+    def _setup_preview_container(self, right_layout: QVBoxLayout):
+        """Setup the preview container."""
         preview_container = QFrame()
         preview_container.setFrameStyle(QFrame.StyledPanel)
         preview_container.setStyleSheet("background-color: #2a2d2e; border: 1px solid #3a3f4b;")
@@ -436,8 +498,9 @@ class MainApp(QMainWindow):
         preview_container_layout.addWidget(self.preview_label)
         
         right_layout.addWidget(preview_container)
-        
-        # Details panel
+
+    def _setup_details_panel(self, right_layout: QVBoxLayout):
+        """Setup the details panel."""
         details_frame = QGroupBox("ℹ️  Details")
         details_layout = QVBoxLayout(details_frame)
         
@@ -455,17 +518,9 @@ class MainApp(QMainWindow):
         details_layout.addWidget(self.details_text)
         
         right_layout.addWidget(details_frame)
-        
-        # Add right frame to splitter
-        self.main_splitter.addWidget(right_frame)
-        
-        # Set splitter weights - give more space to the preview panel
-        self.main_splitter.setStretchFactor(0, 2)  # Left panel
-        self.main_splitter.setStretchFactor(1, 3)  # Right panel
-        
-        explorer_layout.addWidget(self.main_splitter)
-        
-        # === GALLERY VIEW ===
+
+    def _setup_gallery_view(self, views_layout: QVBoxLayout):
+        """Setup the gallery view."""
         self.gallery_view_frame = QFrame()
         gallery_layout = QVBoxLayout(self.gallery_view_frame)
         
@@ -482,8 +537,9 @@ class MainApp(QMainWindow):
             self._open_viewer_from_gallery
         )
         gallery_layout.addWidget(self.gallery_widget)
-        
-        # === SLIDE VIEW ===
+
+    def _setup_slide_view(self, views_layout: QVBoxLayout):
+        """Setup the slide view."""
         self.slide_view_frame = QFrame()
         slide_layout = QVBoxLayout(self.slide_view_frame)
         
@@ -498,15 +554,9 @@ class MainApp(QMainWindow):
             self._switch_to_previous_view
         )
         slide_layout.addWidget(self.slide_widget)
-        
-        # Add all views to container
-        views_layout.addWidget(self.explorer_view_frame)
-        views_layout.addWidget(self.gallery_view_frame)
-        views_layout.addWidget(self.slide_view_frame)
-        
-        main_layout.addWidget(self.views_container)
-        
-        # --- Bottom Control Panel ---
+
+    def _setup_bottom_panel(self, main_layout: QVBoxLayout):
+        """Setup the bottom control panel."""
         bottom_frame = QFrame()
         bottom_frame.setFixedHeight(40)
         bottom_frame.setStyleSheet("background-color: #2c323c; border: none;")
@@ -514,6 +564,15 @@ class MainApp(QMainWindow):
         bottom_layout.setContentsMargins(8, 5, 8, 5)
         
         # Buttons container
+        self._setup_control_buttons(bottom_layout)
+        
+        # Status container
+        self._setup_status_display(bottom_layout)
+        
+        main_layout.addWidget(bottom_frame)
+
+    def _setup_control_buttons(self, bottom_layout: QHBoxLayout):
+        """Setup the control buttons."""
         button_container = QFrame()
         button_layout = QHBoxLayout(button_container)
         button_layout.setSpacing(5)
@@ -542,8 +601,9 @@ class MainApp(QMainWindow):
         button_layout.addWidget(settings_button)
         
         bottom_layout.addWidget(button_container)
-        
-        # Status container
+
+    def _setup_status_display(self, bottom_layout: QHBoxLayout):
+        """Setup the status display."""
         status_container = QFrame()
         status_layout = QHBoxLayout(status_container)
         status_layout.setContentsMargins(0, 0, 0, 0)
@@ -554,12 +614,6 @@ class MainApp(QMainWindow):
         status_layout.addWidget(self.status_label)
         
         bottom_layout.addWidget(status_container, stretch=1)
-        
-        main_layout.addWidget(bottom_frame)
-        
-        # Initialize visibility
-        self._update_view_buttons()
-        self._update_view_visibility()
 
     def _setup_menu(self):
         """Setup the menu bar."""
@@ -849,45 +903,8 @@ class MainApp(QMainWindow):
             print("[DEBUG] No entries to add")
             return
 
-        display_items = []
-        for zip_path, members, mod_time, file_size, image_count in entries:
-            if zip_path in self.zip_files:
-                print(f"[DEBUG] Skipping {zip_path}, already in zip_files")
-                continue
-
-            resolved_members = members
-            resolved_mod_time = mod_time
-            resolved_file_size = file_size
-            resolved_image_count = image_count
-
-            if resolved_members is None and resolved_image_count is None:
-                print(f"[DEBUG] Analyzing zip {zip_path} (full analysis)")
-                is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
-                if not is_valid or not resolved_members:
-                    print(f"[DEBUG] Invalid or empty zip: {zip_path}")
-                    continue
-            elif resolved_members is None and (resolved_mod_time is None or resolved_file_size is None):
-                # Need complete metadata for display
-                print(f"[DEBUG] Analyzing zip {zip_path} (metadata only)")
-                is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
-                if not is_valid:
-                    print(f"[DEBUG] Invalid zip: {zip_path}")
-                    continue
-
-            if resolved_image_count is None:
-                resolved_image_count = len(resolved_members) if resolved_members else 0
-
-            entry_mod_time = resolved_mod_time or 0
-            entry_file_size = resolved_file_size or 0
-
-            self.zip_files[zip_path] = (resolved_members, entry_mod_time, entry_file_size, resolved_image_count)
-            print(f"[DEBUG] Added {zip_path} to zip_files with {resolved_image_count} images")
-
-            display_text = os.path.basename(zip_path)
-            if entry_file_size:
-                display_text += f" ({_format_size(entry_file_size)})"
-            display_items.append(display_text)
-
+        display_items = self._process_entries_for_display(entries)
+        
         if display_items:
             print(f"[DEBUG] Adding {len(display_items)} items to listbox")
             for item_text in display_items:
@@ -897,6 +914,84 @@ class MainApp(QMainWindow):
         print("[DEBUG] Refreshing gallery")
         self._refresh_gallery()
 
+        # Manage selection event connection to avoid duplicates
+        self._manage_zip_selection_connection()
+        print("[DEBUG] Finished adding entries in bulk")
+
+    def _process_entries_for_display(self, entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]]) -> List[str]:
+        """Process entries and prepare them for display."""
+        display_items = []
+        for zip_path, members, mod_time, file_size, image_count in entries:
+            if zip_path in self.zip_files:
+                print(f"[DEBUG] Skipping {zip_path}, already in zip_files")
+                continue
+
+            # Resolve entry details
+            resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self._resolve_entry_details(
+                zip_path, members, mod_time, file_size, image_count)
+
+            # Check if this is a valid entry (contains images)
+            if not self._is_valid_entry(resolved_members):
+                print(f"[DEBUG] Invalid or empty zip: {zip_path}")
+                # 即使没有图片，我们也应该添加到列表中，只是标记为不含图片
+                # 除非你想完全过滤掉不含图片的压缩包
+                # 这里我们假设目标是显示所有压缩包，但标注哪些包含图片
+                pass
+            else:
+                print(f"[DEBUG] Valid zip with images: {zip_path}")
+
+            # Update image count if needed
+            if resolved_image_count is None:
+                resolved_image_count = len(resolved_members) if resolved_members else 0
+
+            entry_mod_time = resolved_mod_time or 0
+            entry_file_size = resolved_file_size or 0
+
+            self.zip_files[zip_path] = (resolved_members, entry_mod_time, entry_file_size, resolved_image_count)
+            print(f"[DEBUG] Added {zip_path} to zip_files with {resolved_image_count} images")
+
+            display_text = self._create_display_text(zip_path, entry_file_size)
+            display_items.append(display_text)
+            
+        return display_items
+
+    def _resolve_entry_details(self, zip_path: str, members: Optional[List[str]], mod_time: Optional[float], 
+                              file_size: Optional[int], image_count: Optional[int]) -> Tuple[Optional[List[str]], Optional[float], Optional[int], Optional[int]]:
+        """Resolve the details for a ZIP file entry."""
+        resolved_members = members
+        resolved_mod_time = mod_time
+        resolved_file_size = file_size
+        resolved_image_count = image_count
+
+        if resolved_members is None and resolved_image_count is None:
+            print(f"[DEBUG] Analyzing zip {zip_path} (full analysis)")
+            is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
+            print(f"[DEBUG] Analysis result - valid: {is_valid}, members count: {len(resolved_members) if resolved_members else 0}, image_count: {resolved_image_count}")
+            # 即使不是有效的图片压缩包，我们也应该返回分析结果，而不是直接返回
+            # 这样可以让调用函数决定如何处理
+        elif resolved_members is None and (resolved_mod_time is None or resolved_file_size is None):
+            # Need complete metadata for display
+            print(f"[DEBUG] Analyzing zip {zip_path} (metadata only)")
+            is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
+            print(f"[DEBUG] Analysis result - valid: {is_valid}")
+
+        return resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count
+
+    def _is_valid_entry(self, members: Optional[List[str]]) -> bool:
+        """Check if the entry is valid (has members)."""
+        # 我们总是想显示这个ZIP文件，不管它是否包含图片
+        # 只是会在UI中标记它包含多少图片
+        return True  # 总是返回True，这样所有ZIP文件都会被添加到列表中
+
+    def _create_display_text(self, zip_path: str, file_size: int) -> str:
+        """Create the display text for a ZIP file entry."""
+        display_text = os.path.basename(zip_path)
+        if file_size:
+            display_text += f" ({_format_size(file_size)})"
+        return display_text
+
+    def _manage_zip_selection_connection(self):
+        """Manage the ZIP selection event connection to avoid duplicates."""
         # Disconnect and reconnect selection event to avoid duplicates
         # Use a flag to track connection state instead of relying on exception handling
         if hasattr(self, '_zip_selection_connected') and self._zip_selection_connected:
@@ -904,7 +999,6 @@ class MainApp(QMainWindow):
         
         self.zip_listbox.itemSelectionChanged.connect(self._on_zip_selected)
         self._zip_selection_connected = True
-        print("[DEBUG] Finished adding entries in bulk")
 
     def _on_update_status(self, message: str):
         """Update status bar (thread-safe)."""
@@ -1053,39 +1147,66 @@ class MainApp(QMainWindow):
 
     def _load_preview(self, zip_path: str, members: List[str], index: int):
         """Load preview image."""
-        if not members or index >= len(members) or index < 0:
+        if not self._is_valid_preview_request(members, index):
             return
 
+        self._cancel_previous_preview_task()
+        self._clear_preview_queue()
+
+        self._update_preview_state(zip_path, members, index)
+        self._update_preview_ui(index, len(members))
+        self._set_preview_loading_message()
+
+        self._submit_preview_task(zip_path, members, index)
+
+        # Use QTimer to periodically check for results
+        self._check_preview_result()
+
+    def _is_valid_preview_request(self, members: List[str], index: int) -> bool:
+        """Check if the preview request is valid."""
+        return members and 0 <= index < len(members)
+
+    def _cancel_previous_preview_task(self):
+        """Cancel the previous preview loading task if it exists."""
         if self.current_preview_future and not self.current_preview_future.done():
             self.current_preview_future.cancel()
 
-        # Clear the queue
+    def _clear_preview_queue(self):
+        """Clear the preview queue."""
         while True:
             try:
                 self.preview_queue.get_nowait()
             except queue.Empty:
                 break
 
+    def _update_preview_state(self, zip_path: str, members: List[str], index: int):
+        """Update the preview state variables."""
         self.current_preview_index = index
         self.current_preview_members = members
         cache_key = (zip_path, members[index])
         self.current_preview_cache_key = cache_key
 
+    def _update_preview_ui(self, index: int, members_count: int):
+        """Update the preview UI elements."""
         # Update preview info label
-        self.preview_info_label.setText(f"Image {index + 1} / {len(members)}")
+        self.preview_info_label.setText(f"Image {index + 1} / {members_count}")
 
         # Update navigation button states
         self.preview_prev_button.setEnabled(index > 0)
-        self.preview_next_button.setEnabled(index < len(members) - 1)
+        self.preview_next_button.setEnabled(index < members_count - 1)
 
+    def _set_preview_loading_message(self):
+        """Set the loading message for the preview."""
+        # Clear the pixmap and show loading message
+        self.preview_label.clear()
+        self.preview_label.setText("Loading preview...")
+
+    def _submit_preview_task(self, zip_path: str, members: List[str], index: int):
+        """Submit the preview loading task to the thread pool."""
         target_size = (
             CONFIG["PERFORMANCE_THUMBNAIL_SIZE"] if self.app_settings['performance_mode']
             else CONFIG["THUMBNAIL_SIZE"]
         )
-
-        # Clear the pixmap and show loading message
-        self.preview_label.clear()
-        self.preview_label.setText("Loading preview...")
 
         self.current_preview_future = self.thread_pool.submit(
             load_image_data_async,
@@ -1095,13 +1216,10 @@ class MainApp(QMainWindow):
             target_size,
             self.preview_queue,
             self.cache,
-            cache_key,
+            (zip_path, members[index]),  # cache_key
             self.zip_manager,
             self.app_settings['performance_mode']
         )
-
-        # Use QTimer to periodically check for results
-        self._check_preview_result()
 
     def _check_preview_result(self):
         """Check if preview image is ready."""

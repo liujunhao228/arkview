@@ -220,32 +220,41 @@ class GalleryView(QFrame):
     def populate(self):
         """Populate gallery with thumbnails of ZIP files."""
         # Ensure we're in gallery view mode
-        self.display_mode = "gallery"
-        # self.back_button.setEnabled(False)  # This needs to be fixed
-        self.album_title_label.setText("🎞️ Gallery")
-
+        self._prepare_gallery_view()
+        
         # Clear existing content
-        for i in reversed(range(self.gallery_inner_layout.count())):
-            self.gallery_inner_layout.itemAt(i).widget().setParent(None)
-
-        # Clear references to help garbage collection
-        self.gallery_cards.clear()
-        self.gallery_thumb_labels.clear()
-        self.gallery_title_labels.clear()
+        self._clear_gallery_content()
 
         zip_paths = list(self.zip_files.keys())
         if not zip_paths:
-            empty_label = QLabel("No albums yet\n\nUse 'Scan Directory' to add archives")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("font-size: 12pt; color: #666666;")
-            empty_label.setMinimumHeight(300)
-            self.gallery_inner_layout.addWidget(empty_label, 0, 0, 1, 1)
-            self.gallery_count_label.setText("")
+            self._show_empty_gallery_message()
             return
 
         self.gallery_count_label.setText(f"{len(zip_paths)} albums")
 
         # Calculate number of columns based on available width
+        self._calculate_columns_for_gallery_view()
+
+        # Create cards for each ZIP file
+        self._create_gallery_cards(zip_paths)
+
+    def _prepare_gallery_view(self):
+        """Prepare the gallery view mode."""
+        self.display_mode = "gallery"
+        # self.back_button.setEnabled(False)  # This needs to be fixed
+        self.album_title_label.setText("🎞️ Gallery")
+
+    def _show_empty_gallery_message(self):
+        """Show a message when no albums are present in the gallery."""
+        empty_label = QLabel("No albums yet\n\nUse 'Scan Directory' to add archives")
+        empty_label.setAlignment(Qt.AlignCenter)
+        empty_label.setStyleSheet("font-size: 12pt; color: #666666;")
+        empty_label.setMinimumHeight(300)
+        self.gallery_inner_layout.addWidget(empty_label, 0, 0, 1, 1)
+        self.gallery_count_label.setText("")
+
+    def _calculate_columns_for_gallery_view(self):
+        """Calculate the number of columns for gallery view based on available width."""
         available_width = self.gallery_inner_widget.width()
         if available_width > 0:
             calculated_columns = max(1, available_width // 250)  # Adjust for new card width
@@ -253,6 +262,8 @@ class GalleryView(QFrame):
         else:
             self.gallery_columns = 3
 
+    def _create_gallery_cards(self, zip_paths: List[str]):
+        """Create gallery cards for each ZIP file."""
         for idx, zip_path in enumerate(zip_paths):
             row = idx // self.gallery_columns
             col = idx % self.gallery_columns
@@ -261,15 +272,7 @@ class GalleryView(QFrame):
     def _create_gallery_card(self, zip_path: str, idx: int, row: int, col: int):
         """Create a gallery card for a ZIP file."""
         # Card container
-        card_container = QWidget()
-        card_container.setFixedSize(240, 300)  # Slightly larger for better proportions
-        card_container.setStyleSheet("""
-            QWidget {
-                background-color: #252829;
-                border: none;
-                border-radius: 6px;  /* Slightly larger radius */
-            }
-        """)
+        card_container = self._create_card_container()
         
         # Add hover effect with event filter
         card_container.installEventFilter(self)
@@ -279,36 +282,87 @@ class GalleryView(QFrame):
         layout.setSpacing(0)
 
         # Thumbnail container
-        thumb_container = QWidget()
-        thumb_container.setFixedSize(240, 210)  # Adjust size accordingly
-        thumb_container.setStyleSheet("background-color: #1f2224;")
+        thumb_container = self._create_thumbnail_container()
         thumb_layout = QVBoxLayout(thumb_container)
         thumb_layout.setContentsMargins(0, 0, 0, 0)
 
         # Thumbnail label
-        thumb_label = QLabel()
-        thumb_label.setAlignment(Qt.AlignCenter)
-        thumb_label.setStyleSheet("background-color: #1f2224; color: #555555; font-size: 32pt;")
-        thumb_label.setText("⏳")
-        thumb_label.setMinimumSize(240, 210)  # Adjust size accordingly
+        thumb_label = self._create_thumbnail_label(zip_path)
         thumb_layout.addWidget(thumb_label)
         self.gallery_thumb_labels[zip_path] = thumb_label
 
         layout.addWidget(thumb_container)
 
         # Info frame
-        info_frame = QWidget()
-        info_frame.setStyleSheet("background-color: #252829;")
+        info_frame = self._create_info_frame()
         info_layout = QVBoxLayout(info_frame)
         info_layout.setContentsMargins(12, 10, 12, 10)  # More spacious margins
 
-        title_label = QLabel(os.path.basename(zip_path))
-        title_label.setStyleSheet("color: #ffffff; font-size: 11pt; font-weight: bold; text-align: left;")  # Larger font
-        title_label.setWordWrap(True)
+        title_label = self._create_title_label(zip_path)
         info_layout.addWidget(title_label)
         self.gallery_title_labels[zip_path] = title_label
 
         # File details
+        self._add_file_details(info_layout, zip_path)
+
+        layout.addWidget(info_frame)
+
+        # Store the card
+        self.gallery_cards[zip_path] = card_container
+
+        # Connect click event
+        self._connect_card_click_events(zip_path, card_container, thumb_label, title_label, info_frame)
+
+        # Add to layout
+        self.gallery_inner_layout.addWidget(card_container, row, col)
+
+        # Request thumbnail
+        self._request_card_thumbnail(zip_path)
+
+    def _create_card_container(self) -> QWidget:
+        """Create the main container for a gallery card."""
+        card_container = QWidget()
+        card_container.setFixedSize(240, 300)  # Slightly larger for better proportions
+        card_container.setStyleSheet("""
+            QWidget {
+                background-color: #252829;
+                border: none;
+                border-radius: 6px;  /* Slightly larger radius */
+            }
+        """)
+        return card_container
+
+    def _create_thumbnail_container(self) -> QWidget:
+        """Create the container for the thumbnail image."""
+        thumb_container = QWidget()
+        thumb_container.setFixedSize(240, 210)  # Adjust size accordingly
+        thumb_container.setStyleSheet("background-color: #1f2224;")
+        return thumb_container
+
+    def _create_thumbnail_label(self, zip_path: str) -> QLabel:
+        """Create the label for displaying the thumbnail."""
+        thumb_label = QLabel()
+        thumb_label.setAlignment(Qt.AlignCenter)
+        thumb_label.setStyleSheet("background-color: #1f2224; color: #555555; font-size: 32pt;")
+        thumb_label.setText("⏳")
+        thumb_label.setMinimumSize(240, 210)  # Adjust size accordingly
+        return thumb_label
+
+    def _create_info_frame(self) -> QWidget:
+        """Create the frame containing file information."""
+        info_frame = QWidget()
+        info_frame.setStyleSheet("background-color: #252829;")
+        return info_frame
+
+    def _create_title_label(self, zip_path: str) -> QLabel:
+        """Create the label for displaying the file title."""
+        title_label = QLabel(os.path.basename(zip_path))
+        title_label.setStyleSheet("color: #ffffff; font-size: 11pt; font-weight: bold; text-align: left;")  # Larger font
+        title_label.setWordWrap(True)
+        return title_label
+
+    def _add_file_details(self, info_layout: QVBoxLayout, zip_path: str):
+        """Add file details to the info layout."""
         entry = self.zip_files.get(zip_path)
         if entry:
             members, mod_time, file_size, image_count = entry
@@ -319,21 +373,16 @@ class GalleryView(QFrame):
             details_label.setStyleSheet("color: #888888; font-size: 9pt; text-align: left;")  # Larger font
             info_layout.addWidget(details_label)
 
-        layout.addWidget(info_frame)
-
-        # Store the card
-        self.gallery_cards[zip_path] = card_container
-
-        # Connect click event
+    def _connect_card_click_events(self, zip_path: str, card_container: QWidget, 
+                                  thumb_label: QLabel, title_label: QLabel, info_frame: QWidget):
+        """Connect click events for all parts of the card."""
         thumb_label.mousePressEvent = lambda event, z=zip_path: self._on_gallery_card_click(z)
         title_label.mousePressEvent = lambda event, z=zip_path: self._on_gallery_card_click(z)
         info_frame.mousePressEvent = lambda event, z=zip_path: self._on_gallery_card_click(z)
         card_container.mousePressEvent = lambda event, z=zip_path: self._on_gallery_card_click(z)
 
-        # Add to layout
-        self.gallery_inner_layout.addWidget(card_container, row, col)
-
-        # Request thumbnail
+    def _request_card_thumbnail(self, zip_path: str):
+        """Request thumbnail for a gallery card."""
         entry = self.zip_files.get(zip_path)
         if entry:
             if entry[0]:  # If there's a members list
@@ -344,8 +393,10 @@ class GalleryView(QFrame):
                 self._request_gallery_thumbnail_for_unloaded_members(zip_path)
         else:
             # If no entry, show error icon
-            thumb_label.setText("⚠️")
-            thumb_label.setStyleSheet("color: #ff7b72; font-size: 28pt;")
+            thumb_label = self.gallery_thumb_labels.get(zip_path)
+            if thumb_label:
+                thumb_label.setText("⚠️")
+                thumb_label.setStyleSheet("color: #ff7b72; font-size: 28pt;")
 
     def _on_gallery_card_click(self, zip_path: str):
         """Handle gallery card click event - show album content in gallery view."""
@@ -423,33 +474,44 @@ class GalleryView(QFrame):
 
     def _reflow_cards(self):
         """Reflow gallery cards based on current column count."""
-        # Clear the layout
+        self._clear_layout_widgets()
+        
+        # Re-add widgets with new positions
+        if self.display_mode == "gallery":
+            self._reflow_gallery_cards()
+        elif self.display_mode == "album" and self.current_album_zip_path:
+            self._reflow_album_cards()
+
+    def _clear_layout_widgets(self):
+        """Clear all widgets from the gallery layout."""
         for i in reversed(range(self.gallery_inner_layout.count())):
             widget = self.gallery_inner_layout.itemAt(i).widget()
             if widget:
                 self.gallery_inner_layout.removeWidget(widget)
-                
-        # Re-add widgets with new positions
-        if self.display_mode == "gallery":
-            zip_paths = list(self.gallery_cards.keys())
-            for idx, zip_path in enumerate(zip_paths):
-                row = idx // self.gallery_columns
-                col = idx % self.gallery_columns
-                self.gallery_inner_layout.addWidget(self.gallery_cards[zip_path], row, col)
-        elif self.display_mode == "album" and self.current_album_zip_path:
-            entry = self.zip_files.get(self.current_album_zip_path)
-            if entry:
-                members = entry[0]
-                if members is None:
-                    members = self.ensure_members_loaded(self.current_album_zip_path)
-                
-                if members:
-                    for idx, member_path in enumerate(members):
-                        row = idx // self.gallery_columns
-                        col = idx % self.gallery_columns
-                        card_key = f"{self.current_album_zip_path}:{idx}"
-                        if card_key in self.gallery_cards:
-                            self.gallery_inner_layout.addWidget(self.gallery_cards[card_key], row, col)
+
+    def _reflow_gallery_cards(self):
+        """Reflow gallery cards in gallery view mode."""
+        zip_paths = list(self.gallery_cards.keys())
+        for idx, zip_path in enumerate(zip_paths):
+            row = idx // self.gallery_columns
+            col = idx % self.gallery_columns
+            self.gallery_inner_layout.addWidget(self.gallery_cards[zip_path], row, col)
+
+    def _reflow_album_cards(self):
+        """Reflow image cards in album view mode."""
+        entry = self.zip_files.get(self.current_album_zip_path)
+        if entry:
+            members = entry[0]
+            if members is None:
+                members = self.ensure_members_loaded(self.current_album_zip_path)
+            
+            if members:
+                for idx, member_path in enumerate(members):
+                    row = idx // self.gallery_columns
+                    col = idx % self.gallery_columns
+                    card_key = f"{self.current_album_zip_path}:{idx}"
+                    if card_key in self.gallery_cards:
+                        self.gallery_inner_layout.addWidget(self.gallery_cards[card_key], row, col)
 
     def _schedule_gallery_thumbnail_poll(self):
         """Schedule thumbnail polling with debouncing."""
@@ -556,6 +618,27 @@ class GalleryView(QFrame):
     def _display_album_content(self, zip_path: str):
         """Display the contents of a ZIP file."""
         # Clear existing content
+        self._clear_gallery_content()
+
+        entry = self.zip_files.get(zip_path)
+        if not entry:
+            return
+
+        members = self._get_members_for_zip(zip_path, entry)
+        if not members:
+            self._show_no_images_message()
+            return
+
+        self.gallery_count_label.setText(f"{len(members)} images")
+        
+        # Calculate number of columns based on available width
+        self._calculate_columns_for_album_view()
+        
+        # Create grid for album view based on calculated columns
+        self._create_album_grid(zip_path, members)
+
+    def _clear_gallery_content(self):
+        """Clear all content from the gallery view."""
         for i in reversed(range(self.gallery_inner_layout.count())):
             self.gallery_inner_layout.itemAt(i).widget().setParent(None)
 
@@ -564,26 +647,24 @@ class GalleryView(QFrame):
         self.gallery_thumb_labels.clear()
         self.gallery_title_labels.clear()
 
-        entry = self.zip_files.get(zip_path)
-        if not entry:
-            return
-
+    def _get_members_for_zip(self, zip_path: str, entry: Tuple[Optional[List[str]], float, int, int]) -> Optional[List[str]]:
+        """Get members list for a ZIP file, loading if necessary."""
         members = entry[0]
         if members is None:
             members = self.ensure_members_loaded(zip_path)
+        return members
 
-        if not members:
-            empty_label = QLabel("No images found in this album")
-            empty_label.setAlignment(Qt.AlignCenter)
-            empty_label.setStyleSheet("font-size: 12pt; color: #666666;")
-            empty_label.setMinimumHeight(300)
-            self.gallery_inner_layout.addWidget(empty_label, 0, 0, 1, 1)
-            self.gallery_count_label.setText("0 images")
-            return
+    def _show_no_images_message(self):
+        """Show a message when no images are found in the album."""
+        empty_label = QLabel("No images found in this album")
+        empty_label.setAlignment(Qt.AlignCenter)
+        empty_label.setStyleSheet("font-size: 12pt; color: #666666;")
+        empty_label.setMinimumHeight(300)
+        self.gallery_inner_layout.addWidget(empty_label, 0, 0, 1, 1)
+        self.gallery_count_label.setText("0 images")
 
-        self.gallery_count_label.setText(f"{len(members)} images")
-
-        # 计算基于可用宽度的列数
+    def _calculate_columns_for_album_view(self):
+        """Calculate the number of columns for album view based on available width."""
         available_width = self.gallery_inner_widget.width()
         if available_width > 0:
             # 根据可用宽度计算列数，最小卡片宽度为220像素
@@ -592,7 +673,8 @@ class GalleryView(QFrame):
         else:
             self.gallery_columns = 3  # 默认列数
 
-        # Create grid for album view based on calculated columns
+    def _create_album_grid(self, zip_path: str, members: List[str]):
+        """Create the grid of image cards for the album view."""
         for idx, member_path in enumerate(members):
             row = idx // self.gallery_columns
             col = idx % self.gallery_columns
@@ -602,47 +684,29 @@ class GalleryView(QFrame):
         """Create a card for a single image in album view."""
         # Card container
         card_key = f"{zip_path}:{index}"
-        card_container = QWidget()
-        card_container.setFixedSize(220, 290)  # 调整高度以更好地容纳信息
-        card_container.setStyleSheet("""
-            QWidget {
-                background-color: #2c323c;
-                border: none;
-                border-radius: 6px;
-            }
-        """)
+        card_container = self._create_image_card_container()
         
         layout = QVBoxLayout(card_container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         # Thumbnail container
-        thumb_container = QWidget()
-        thumb_container.setFixedSize(220, 190)  # 调整缩略图容器大小
-        thumb_container.setStyleSheet("background-color: #1f2224; border-top-left-radius: 6px; border-top-right-radius: 6px;")
+        thumb_container = self._create_image_thumbnail_container()
         thumb_layout = QVBoxLayout(thumb_container)
         thumb_layout.setContentsMargins(0, 0, 0, 0)
 
-        thumb_label = QLabel()
-        thumb_label.setAlignment(Qt.AlignCenter)
-        thumb_label.setStyleSheet("background-color: #1f2224; color: #555555; font-size: 32pt;")
-        thumb_label.setText("⏳")
-        thumb_label.setMinimumSize(220, 190)  # 调整缩略图标签大小
+        thumb_label = self._create_image_thumbnail_label()
         thumb_layout.addWidget(thumb_label)
         self.gallery_thumb_labels[card_key] = thumb_label
 
         layout.addWidget(thumb_container)
 
         # Info frame
-        info_frame = QWidget()
-        info_frame.setStyleSheet("background-color: #2c323c; border-bottom-left-radius: 6px; border-bottom-right-radius: 6px;")
+        info_frame = self._create_image_info_frame()
         info_layout = QVBoxLayout(info_frame)
         info_layout.setContentsMargins(10, 8, 10, 8)  # 调整边距
 
-        title_label = QLabel(os.path.basename(member_path))
-        title_label.setStyleSheet("color: #ffffff; font-size: 9pt; font-weight: bold; text-align: left;")
-        title_label.setWordWrap(True)
-        title_label.setMaximumHeight(20)  # 限制标题高度
+        title_label = self._create_image_title_label(member_path)
         info_layout.addWidget(title_label)
         self.gallery_title_labels[card_key] = title_label
 
@@ -652,16 +716,66 @@ class GalleryView(QFrame):
         self.gallery_cards[card_key] = card_container
 
         # Connect click event
-        thumb_label.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
-        title_label.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
-        info_frame.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
-        card_container.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
+        self._connect_image_card_click_events(zip_path, member_path, index, card_container, thumb_label, title_label, info_frame)
 
         # Add to layout
         self.gallery_inner_layout.addWidget(card_container, row, col)
 
         # Request thumbnail
         self._request_image_thumbnail(zip_path, member_path, card_key)
+
+    def _create_image_card_container(self) -> QWidget:
+        """Create the main container for an image card."""
+        card_key = f"{self.sender() if self.sender() else 'unknown'}"  # Placeholder - will be overridden
+        card_container = QWidget()
+        card_container.setFixedSize(220, 290)  # 调整高度以更好地容纳信息
+        card_container.setStyleSheet("""
+            QWidget {
+                background-color: #2c323c;
+                border: none;
+                border-radius: 6px;
+            }
+        """)
+        return card_container
+
+    def _create_image_thumbnail_container(self) -> QWidget:
+        """Create the container for the image thumbnail."""
+        thumb_container = QWidget()
+        thumb_container.setFixedSize(220, 190)  # 调整缩略图容器大小
+        thumb_container.setStyleSheet("background-color: #1f2224; border-top-left-radius: 6px; border-top-right-radius: 6px;")
+        return thumb_container
+
+    def _create_image_thumbnail_label(self) -> QLabel:
+        """Create the label for displaying the image thumbnail."""
+        thumb_label = QLabel()
+        thumb_label.setAlignment(Qt.AlignCenter)
+        thumb_label.setStyleSheet("background-color: #1f2224; color: #555555; font-size: 32pt;")
+        thumb_label.setText("⏳")
+        thumb_label.setMinimumSize(220, 190)  # 调整缩略图标签大小
+        return thumb_label
+
+    def _create_image_info_frame(self) -> QWidget:
+        """Create the frame containing image information."""
+        info_frame = QWidget()
+        info_frame.setStyleSheet("background-color: #2c323c; border-bottom-left-radius: 6px; border-bottom-right-radius: 6px;")
+        return info_frame
+
+    def _create_image_title_label(self, member_path: str) -> QLabel:
+        """Create the label for displaying the image title."""
+        title_label = QLabel(os.path.basename(member_path))
+        title_label.setStyleSheet("color: #ffffff; font-size: 9pt; font-weight: bold; text-align: left;")
+        title_label.setWordWrap(True)
+        title_label.setMaximumHeight(20)  # 限制标题高度
+        return title_label
+
+    def _connect_image_card_click_events(self, zip_path: str, member_path: str, index: int,
+                                       card_container: QWidget, thumb_label: QLabel, 
+                                       title_label: QLabel, info_frame: QWidget):
+        """Connect click events for all parts of the image card."""
+        thumb_label.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
+        title_label.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
+        info_frame.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
+        card_container.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
 
     def _request_image_thumbnail(self, zip_path: str, member_path: str, card_key: str):
         """Request thumbnail for an image in album view."""
