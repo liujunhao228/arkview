@@ -4,7 +4,8 @@ PySide UI components for Arkview.
 
 import os
 import platform
-from typing import Any, Dict, List, Optional, Tuple
+import queue
+from typing import Any, Dict, List, Optional, Tuple, Callable
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFrame, QLabel,
@@ -20,6 +21,286 @@ from .core import (
     ZipScanner, ZipFileManager, LRUCache, load_image_data_async,
     LoadResult, _format_size
 )
+
+
+class SlideView(QFrame):
+    """Slide view for displaying individual images from a ZIP archive."""
+    
+    def __init__(
+        self,
+        parent,
+        zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]],
+        app_settings: Dict[str, Any],
+        cache: LRUCache,
+        thread_pool,
+        zip_manager: ZipFileManager,
+        config: Dict[str, Any],
+        back_callback: Optional[Callable] = None
+    ):
+        super().__init__(parent)
+        
+        self.zip_files = zip_files
+        self.app_settings = app_settings
+        self.cache = cache
+        self.thread_pool = thread_pool
+        self.zip_manager = zip_manager
+        self.config = config
+        self.back_callback = back_callback
+        
+        self.current_zip_path: Optional[str] = None
+        self.current_members: Optional[List[str]] = None
+        self.current_index: int = 0
+        
+        self.result_queue: queue.Queue = queue.Queue()
+        self.current_pil_image: Optional[Image.Image] = None
+        self.zoom_factor: float = 1.0
+        self.fit_to_window: bool = True
+        self._is_loading: bool = False
+        
+        self._setup_ui()
+        self._apply_dark_theme()
+        
+    def _apply_dark_theme(self):
+        """Apply dark theme to the slide view."""
+        palette = self.palette()
+        palette.setColor(QPalette.Window, QColor(40, 44, 52))
+        palette.setColor(QPalette.WindowText, QColor(233, 237, 237))
+        self.setPalette(palette)
+        
+        self.setStyleSheet("""
+            QFrame {
+                background-color: #282c34;
+                color: #e8eaed;
+            }
+            QPushButton {
+                background-color: #3a3f4b;
+                border: 1px solid #444a58;
+                border-radius: 4px;
+                color: #e8eaed;
+                padding: 6px 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #444a58;
+            }
+            QPushButton:pressed {
+                background-color: #323741;
+            }
+            QPushButton#nav-button {
+                min-width: 100px;
+                padding: 8px 16px;
+                font-size: 12pt;
+            }
+            QPushButton#back-button {
+                background-color: #00bc8c;
+                border-color: #00a47a;
+                color: #ffffff;
+                font-weight: bold;
+                padding: 8px 16px;
+            }
+            QPushButton#back-button:hover {
+                background-color: #00a47a;
+            }
+            QLabel {
+                color: #e8eaed;
+            }
+        """)
+        
+    def _setup_ui(self):
+        """Setup the slide view UI."""
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Top navigation bar
+        nav_frame = QFrame()
+        nav_frame.setFixedHeight(60)
+        nav_layout = QHBoxLayout(nav_frame)
+        nav_layout.setContentsMargins(12, 12, 12, 12)
+        nav_layout.setSpacing(15)
+        
+        self.back_button = QPushButton("⬅ Back")
+        self.back_button.setObjectName("back-button")
+        self.back_button.clicked.connect(self._on_back_clicked)
+        nav_layout.addWidget(self.back_button)
+        
+        self.title_label = QLabel("Slide View")
+        self.title_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
+        nav_layout.addWidget(self.title_label)
+        
+        nav_layout.addStretch()
+        
+        self.image_info_label = QLabel("")
+        self.image_info_label.setStyleSheet("font-size: 10pt; color: #bbbbbb;")
+        nav_layout.addWidget(self.image_info_label)
+        
+        main_layout.addWidget(nav_frame)
+        
+        # Main content area
+        content_frame = QFrame()
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Image display area
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setStyleSheet("background-color: #1c1e1f; border-radius: 4px;")
+        self.image_label.setMinimumSize(400, 300)
+        content_layout.addWidget(self.image_label, stretch=1)
+        
+        # Navigation controls
+        nav_controls_frame = QFrame()
+        nav_controls_frame.setFixedHeight(80)
+        nav_controls_layout = QHBoxLayout(nav_controls_frame)
+        nav_controls_layout.setContentsMargins(0, 0, 0, 0)
+        nav_controls_layout.setSpacing(20)
+        
+        nav_controls_layout.addStretch()
+        
+        self.prev_button = QPushButton("◀ Previous")
+        self.prev_button.setObjectName("nav-button")
+        self.prev_button.clicked.connect(self._show_prev)
+        nav_controls_layout.addWidget(self.prev_button)
+        
+        self.next_button = QPushButton("Next ▶")
+        self.next_button.setObjectName("nav-button")
+        self.next_button.clicked.connect(self._show_next)
+        nav_controls_layout.addWidget(self.next_button)
+        
+        nav_controls_layout.addStretch()
+        
+        content_layout.addWidget(nav_controls_frame)
+        
+        main_layout.addWidget(content_frame)
+        
+    def populate(self, zip_path: str, members: List[str], index: int = 0):
+        """Populate the slide view with images from a ZIP file."""
+        self.current_zip_path = zip_path
+        self.current_members = members
+        self.current_index = index
+        
+        # Update title
+        zip_name = os.path.basename(zip_path)
+        self.title_label.setText(f"🖼️ {zip_name}")
+        
+        # Load the initial image
+        self.load_image(index)
+        
+    def load_image(self, index: int):
+        """Load and display an image at the given index."""
+        if (not self.current_members or 
+            index < 0 or 
+            index >= len(self.current_members)):
+            return
+            
+        self.current_index = index
+        self._update_navigation_state()
+        
+        # Update image info
+        self.image_info_label.setText(
+            f"Image {index + 1} of {len(self.current_members)}"
+        )
+        
+        self._is_loading = True
+        cache_key = (self.current_zip_path, self.current_members[index])
+        
+        # Clear previous image
+        self.image_label.clear()
+        self.image_label.setText("Loading...")
+        
+        self.thread_pool.submit(
+            load_image_data_async,
+            self.current_zip_path,
+            self.current_members[index],
+            100 * 1024 * 1024,  # Max viewer load size
+            None,  # No resizing for viewer
+            self.result_queue,
+            self.cache,
+            cache_key,
+            self.zip_manager,
+            self.app_settings.get('performance_mode', False)
+        )
+        
+        self._check_load_result()
+        
+    def _check_load_result(self):
+        """Check for loaded image results."""
+        try:
+            result = self.result_queue.get_nowait()
+            if result.success:
+                self.current_pil_image = result.data
+                self._update_display()
+            else:
+                self.image_label.setText(f"Error: {result.error_message}")
+            self._is_loading = False
+        except queue.Empty:
+            # Queue is empty, check again later
+            if self._is_loading:
+                QTimer.singleShot(50, self._check_load_result)
+                
+    def _update_display(self):
+        """Update the image display."""
+        if self.current_pil_image is None:
+            return
+            
+        # Get the size of the label to determine display area
+        display_width = self.image_label.width()
+        display_height = self.image_label.height()
+        
+        img = self.current_pil_image.copy()
+        
+        if self.fit_to_window:
+            # Fit image to the display area while preserving aspect ratio
+            img.thumbnail(
+                (display_width - 20, display_height - 20), 
+                Image.Resampling.LANCZOS
+            )
+        else:
+            # Apply zoom factor
+            new_width = int(img.width * self.zoom_factor)
+            new_height = int(img.height * self.zoom_factor)
+            if new_width > 0 and new_height > 0:
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+        # Convert PIL image to QPixmap and set it to the label
+        try:
+            qimage = PIL.ImageQt.ImageQt(img)
+            pixmap = QPixmap.fromImage(qimage)
+            self.image_label.setPixmap(pixmap)
+            self.image_label.setText("")
+        except Exception as e:
+            self.image_label.setText(f"Error displaying image: {str(e)}")
+            
+    def _update_navigation_state(self):
+        """Update the state of navigation buttons."""
+        if not self.current_members:
+            self.prev_button.setEnabled(False)
+            self.next_button.setEnabled(False)
+            return
+            
+        self.prev_button.setEnabled(self.current_index > 0)
+        self.next_button.setEnabled(self.current_index < len(self.current_members) - 1)
+        
+    def _show_prev(self):
+        """Show the previous image."""
+        if self.current_index > 0:
+            self.load_image(self.current_index - 1)
+            
+    def _show_next(self):
+        """Show the next image."""
+        if self.current_members and self.current_index < len(self.current_members) - 1:
+            self.load_image(self.current_index + 1)
+            
+    def _on_back_clicked(self):
+        """Handle back button click."""
+        if self.back_callback:
+            self.back_callback()
+            
+    def resizeEvent(self, event):
+        """Handle resize events to rescale the image."""
+        super().resizeEvent(event)
+        if self.current_pil_image and not self._is_loading:
+            self._update_display()
 
 
 def format_datetime(timestamp: float) -> str:
@@ -254,19 +535,20 @@ class ImageViewerWindow(QDialog):
         # Image display
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background-color: #1c1e1f;")
+        self.image_label.setStyleSheet("background-color: #1c1e1f; border-radius: 4px;")
         self.image_label.setMinimumSize(400, 300)
         main_layout.addWidget(self.image_label, stretch=1)
 
         # Status bar at the bottom
         self.status_frame = QFrame()
-        self.status_frame.setFixedHeight(25)
+        self.status_frame.setFixedHeight(30)
         status_layout = QHBoxLayout(self.status_frame)
         status_layout.setContentsMargins(8, 4, 8, 4)
 
         self.status_label = QLabel("")
         self.status_label.setAlignment(Qt.AlignLeft)
-        self.status_label.setStyleSheet("font-size: 9pt;")
+        self.status_label.setStyleSheet("font-size: 9pt; color: #bbbbbb;")
+        self.status_label.setMinimumHeight(20)
         status_layout.addWidget(self.status_label)
 
         main_layout.addWidget(self.status_frame)
@@ -372,12 +654,13 @@ class ImageViewerWindow(QDialog):
             result = self.result_queue.get_nowait()
             if result.success:
                 self.current_pil_image = result.data
+                self.status_label.setText(f"Loaded: {os.path.basename(self.image_members[self.current_index])}")
             else:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self, "Error", f"Failed to load image: {result.error_message}")
+                self.status_label.setText(f"Error: {result.error_message}")
+                self.current_pil_image = None
             self._is_loading = False
             self._update_display()
-        except Exception:
+        except queue.Empty:
             # Queue is empty, check again later
             if self._is_loading:
                 QTimer.singleShot(50, self._check_load_result)

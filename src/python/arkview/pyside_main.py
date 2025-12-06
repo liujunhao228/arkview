@@ -38,7 +38,7 @@ from .core import (
     LoadResult, _format_size, RUST_AVAILABLE
 )
 from .pyside_ui import (
-    SettingsDialog, ImageViewerWindow
+    SettingsDialog, ImageViewerWindow, SlideView
 )
 from .pyside_gallery import GalleryView
 
@@ -154,8 +154,15 @@ class MainApp(QMainWindow):
         self.scan_thread = None
         self.scan_stop_event = threading.Event()
 
-        self.current_view = "explorer"  # "explorer" or "gallery"
+        self.current_view = "explorer"  # "explorer", "gallery", or "slide"
+        self.slide_view_context: Dict[str, Any] = {
+            "zip_path": None,
+            "members": None,
+            "current_index": 0,
+            "previous_view": "explorer"  # Can be "explorer" or "gallery"
+        }
         self.gallery_widget: Optional[GalleryView] = None
+        self.slide_widget: Optional[SlideView] = None
         self._zip_selection_connected = False  # Track connection state of zip selection signal
 
         # Set up the UI
@@ -408,7 +415,7 @@ class MainApp(QMainWindow):
         preview_container = QFrame()
         preview_container.setFrameStyle(QFrame.StyledPanel)
         preview_container.setStyleSheet("background-color: #2a2d2e; border: 1px solid #3a3f4b;")
-        preview_container.setMinimumHeight(200)  # Set minimum height
+        preview_container.setMinimumHeight(300)  # Increase minimum height for better proportion
         
         preview_container_layout = QVBoxLayout(preview_container)
         preview_container_layout.setContentsMargins(2, 2, 2, 2)
@@ -424,7 +431,8 @@ class MainApp(QMainWindow):
         """)
         self.preview_label.setText("Select a ZIP file")
         self.preview_label.mousePressEvent = self._on_preview_click
-        self.preview_label.setScaledContents(True)  # Make images scale to fit
+        self.preview_label.setScaledContents(False)  # Change to False for aspect ratio scaling
+        self.preview_label.setMinimumSize(1, 1)
         preview_container_layout.addWidget(self.preview_label)
         
         right_layout.addWidget(preview_container)
@@ -434,7 +442,7 @@ class MainApp(QMainWindow):
         details_layout = QVBoxLayout(details_frame)
         
         self.details_text = QScrollArea()
-        self.details_text.setMinimumHeight(150)
+        self.details_text.setMinimumHeight(200)  # Increase minimum height
         self.details_text.setWidgetResizable(True)
         self.details_widget = QWidget()
         self.details_layout = QVBoxLayout(self.details_widget)
@@ -451,9 +459,9 @@ class MainApp(QMainWindow):
         # Add right frame to splitter
         self.main_splitter.addWidget(right_frame)
         
-        # Set splitter weights
-        self.main_splitter.setStretchFactor(0, 1)  # Left panel
-        self.main_splitter.setStretchFactor(1, 1)  # Right panel
+        # Set splitter weights - give more space to the preview panel
+        self.main_splitter.setStretchFactor(0, 2)  # Left panel
+        self.main_splitter.setStretchFactor(1, 3)  # Right panel
         
         explorer_layout.addWidget(self.main_splitter)
         
@@ -475,9 +483,26 @@ class MainApp(QMainWindow):
         )
         gallery_layout.addWidget(self.gallery_widget)
         
-        # Add both views to container
+        # === SLIDE VIEW ===
+        self.slide_view_frame = QFrame()
+        slide_layout = QVBoxLayout(self.slide_view_frame)
+        
+        self.slide_widget = SlideView(
+            self.slide_view_frame,
+            self.zip_files,
+            self.app_settings,
+            self.cache,
+            self.thread_pool,
+            self.zip_manager,
+            CONFIG,
+            self._switch_to_previous_view
+        )
+        slide_layout.addWidget(self.slide_widget)
+        
+        # Add all views to container
         views_layout.addWidget(self.explorer_view_frame)
         views_layout.addWidget(self.gallery_view_frame)
+        views_layout.addWidget(self.slide_view_frame)
         
         main_layout.addWidget(self.views_container)
         
@@ -503,7 +528,7 @@ class MainApp(QMainWindow):
         view_button = QPushButton("👁️ View")
         view_button.setObjectName("success")
         view_button.setFixedWidth(80)
-        view_button.clicked.connect(self._open_viewer)
+        view_button.clicked.connect(self._open_slide_view)  # Changed from _open_viewer to _open_slide_view
         button_layout.addWidget(view_button)
         
         clear_button = QPushButton("🗑️ Clear")
@@ -601,11 +626,15 @@ class MainApp(QMainWindow):
 
     def _switch_view(self, view: str):
         """Switch between explorer and gallery views."""
-        if view not in ["explorer", "gallery"]:
+        if view not in ["explorer", "gallery", "slide"]:
             return
 
         if self.current_view == view:
             return
+
+        # Save context when leaving slide view
+        if self.current_view == "slide" and view != "slide":
+            self.slide_view_context["previous_view"] = self.current_view
 
         self.current_view = view
         self._update_view_buttons()
@@ -613,9 +642,34 @@ class MainApp(QMainWindow):
 
         if view == "gallery" and self.gallery_widget:
             self.gallery_widget.populate()
+        elif view == "slide" and self.slide_widget:
+            # Context should be set before calling this method
+            pass
+
+    def _switch_to_previous_view(self):
+        """Switch back to the previous view from slide view."""
+        previous_view = self.slide_view_context.get("previous_view", "explorer")
+        self._switch_view(previous_view)
 
     def _update_view_buttons(self):
         """Update view button styles based on current view."""
+        # Reset all buttons
+        self.explorer_view_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3a3f4b;
+                border: 1px solid #444a58;
+                color: #e8eaed;
+            }
+        """)
+        self.gallery_view_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3a3f4b;
+                border: 1px solid #444a58;
+                color: #e8eaed;
+            }
+        """)
+        
+        # Highlight current view
         if self.current_view == "explorer":
             self.explorer_view_button.setStyleSheet("""
                 QPushButton {
@@ -625,21 +679,7 @@ class MainApp(QMainWindow):
                     font-weight: bold;
                 }
             """)
-            self.gallery_view_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #3a3f4b;
-                    border: 1px solid #444a58;
-                    color: #e8eaed;
-                }
-            """)
-        else:
-            self.explorer_view_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #3a3f4b;
-                    border: 1px solid #444a58;
-                    color: #e8eaed;
-                }
-            """)
+        elif self.current_view == "gallery":
             self.gallery_view_button.setStyleSheet("""
                 QPushButton {
                     background-color: #00bc8c;
@@ -651,12 +691,16 @@ class MainApp(QMainWindow):
 
     def _update_view_visibility(self):
         """Update view visibility based on current view."""
+        self.explorer_view_frame.hide()
+        self.gallery_view_frame.hide()
+        self.slide_view_frame.hide()
+        
         if self.current_view == "explorer":
-            self.gallery_view_frame.hide()
             self.explorer_view_frame.show()
-        else:
-            self.explorer_view_frame.hide()
+        elif self.current_view == "gallery":
             self.gallery_view_frame.show()
+        elif self.current_view == "slide":
+            self.slide_view_frame.show()
 
     def _refresh_gallery(self):
         """Refresh gallery view if visible."""
@@ -867,22 +911,31 @@ class MainApp(QMainWindow):
         self.status_label.setText(message)
 
     def _on_update_preview(self, result_tuple):
-        """Update preview (thread-safe)."""
+        """Update the preview image with aspect ratio scaling."""
         pil_image, error_msg = result_tuple
         if pil_image and not error_msg:
-            # Convert PIL image to QPixmap using the proper method
+            # Convert PIL image to QPixmap
             try:
-                qimage = PIL.ImageQt.ImageQt(pil_image)
+                qimage = PIL.ImageQt.toqimage(pil_image)
                 pixmap = QPixmap.fromImage(qimage)
-                self.preview_label.setPixmap(pixmap)
+                
+                # Store the pixmap for resizing
+                self.current_preview_pixmap = pixmap
+                
+                # Scale the pixmap to fit the label while maintaining aspect ratio
+                scaled_pixmap = pixmap.scaled(
+                    self.preview_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                self.preview_label.setPixmap(scaled_pixmap)
                 self.preview_label.setText("")  # Clear text when showing image
             except Exception as e:
-                print(f"Error converting image to pixmap: {e}")
                 self.preview_label.clear()
-                self.preview_label.setText(f"Error displaying image")
+                self.preview_label.setText(f"Error converting image: {str(e)}")
         else:
             self.preview_label.clear()
-            self.preview_label.setText(f"Error: {error_msg}" if error_msg else "Select a ZIP file")
+            self.preview_label.setText(f"Error: {error_msg}" if error_msg else "Preview not available")
 
     def _on_zip_selected(self):
         """Handle ZIP file selection."""
@@ -1097,8 +1150,8 @@ class MainApp(QMainWindow):
         self.preview_next_button.setEnabled(False)
 
     def _on_preview_click(self, event):
-        """Handle preview click to open viewer."""
-        self._open_viewer()
+        """Handle preview click to open slide view."""
+        self._open_slide_view()
 
     def _preview_prev(self):
         if not self.current_selected_zip or not self.current_preview_members:
@@ -1114,16 +1167,11 @@ class MainApp(QMainWindow):
         if current_index + 1 < len(self.current_preview_members):
             self._load_preview(self.current_selected_zip, self.current_preview_members, current_index + 1)
 
-    def _open_viewer(self):
-        """Open the multi-image viewer."""
+    def _open_slide_view(self):
+        """Open the slide view for the currently selected ZIP file."""
         if not self.current_selected_zip:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "No Selection", "Please select an archive first.")
-            return
-
-        if not self.app_settings.get('viewer_enabled', True):
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "Disabled", "Multi-image viewer is disabled in settings.")
             return
 
         zip_path = self.current_selected_zip
@@ -1141,42 +1189,31 @@ class MainApp(QMainWindow):
                 QMessageBox.critical(self, "Error", "Unable to load archive contents.")
                 return
 
-        index = self.current_preview_index or 0
+        # Set context for slide view
+        self.slide_view_context = {
+            "zip_path": zip_path,
+            "members": members,
+            "current_index": self.current_preview_index or 0,
+            "previous_view": "explorer"
+        }
 
-        viewer_queue = queue.Queue()
-        viewer_window = ImageViewerWindow(
-            self,
-            zip_path,
-            members,
-            index,
-            self.app_settings,
-            self.cache,
-            viewer_queue,
-            self.thread_pool,
-            self.zip_manager
-        )
-        viewer_window.show()
+        # Populate slide widget and switch to slide view
+        self.slide_widget.populate(zip_path, members, self.current_preview_index or 0)
+        self._switch_view("slide")
 
     def _open_viewer_from_gallery(self, zip_path: str, members: List[str], index: int):
-        """Open viewer when triggered from gallery view."""
-        if not self.app_settings.get('viewer_enabled', True):
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "Disabled", "Multi-image viewer is disabled in settings.")
-            return
+        """Open slide view when triggered from gallery view."""
+        # Set context for slide view
+        self.slide_view_context = {
+            "zip_path": zip_path,
+            "members": members,
+            "current_index": index,
+            "previous_view": "gallery"
+        }
 
-        viewer_queue = queue.Queue()
-        viewer_window = ImageViewerWindow(
-            self,
-            zip_path,
-            members,
-            index,
-            self.app_settings,
-            self.cache,
-            viewer_queue,
-            self.thread_pool,
-            self.zip_manager
-        )
-        viewer_window.show()
+        # Populate slide widget and switch to slide view
+        self.slide_widget.populate(zip_path, members, index)
+        self._switch_view("slide")
 
     def _on_gallery_selection(self, zip_path: str, members: List[str], index: int):
         """Handle selection change in gallery view."""
@@ -1251,7 +1288,28 @@ BSD-2-Clause License"""
         if hasattr(self, 'thumbnail_loader'):
             self.thumbnail_loader.stop()
         self.thread_pool.shutdown(wait=False)
+        
+        # Clean up slide widget if it exists
+        if hasattr(self, 'slide_widget') and self.slide_widget:
+            # Make sure any running threads in slide widget are stopped
+            pass
+            
         event.accept()
+
+    def resizeEvent(self, event):
+        """Handle window resize events to rescale preview image."""
+        super().resizeEvent(event)
+        # Rescale the preview image when the window is resized
+        if hasattr(self, 'current_preview_pixmap') and self.current_preview_pixmap:
+            try:
+                scaled_pixmap = self.current_preview_pixmap.scaled(
+                    self.preview_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                self.preview_label.setPixmap(scaled_pixmap)
+            except Exception as e:
+                print(f"Error rescaling preview image: {e}")
 
 
 def main():
