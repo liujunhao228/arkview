@@ -69,6 +69,32 @@ impl ZipScanner {
             });
         let file_size = metadata.len();
 
+        // Check for potentially huge files to avoid hanging on extremely large archives
+        if file_size > 500 * 1024 * 1024 { // 500MB limit for safety - can be adjusted
+            return Ok((false, None, mod_time, Some(file_size), 0));
+        }
+
+        // For potentially problematic files, try to read just a small portion first
+        let file = match fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return Ok((false, None, mod_time, Some(file_size), 0)),
+        };
+
+        // Check if we can read the start of the file to verify it's accessible
+        let mut buffer = [0; 4];  // Read just first 4 bytes
+        let mut file_clone = file.try_clone().unwrap_or(file);
+        match file_clone.read_exact(&mut buffer) {
+            Ok(_) => {
+                // File readable, proceed with ZIP opening
+                drop(file_clone); // Close the cloned file handle
+            },
+            Err(_) => {
+                // Can't read the file, likely corrupted or locked
+                return Ok((false, None, mod_time, Some(file_size), 0));
+            }
+        }
+
+        // Now try to open the ZIP - if this hangs, it's likely a Rust-side issue
         let file = match fs::File::open(path) {
             Ok(f) => f,
             Err(_) => return Ok((false, None, mod_time, Some(file_size), 0)),
@@ -80,7 +106,12 @@ impl ZipScanner {
         };
 
         let total_entries = zip.len();
-        
+
+        // Check for potentially huge number of entries to avoid hanging
+        if total_entries > 10000 {
+            return Ok((false, None, mod_time, Some(file_size), 0));
+        }
+
         let mut image_members = if should_collect {
             Vec::with_capacity(std::cmp::min(total_entries, 100))
         } else {
@@ -89,8 +120,21 @@ impl ZipScanner {
         let mut image_count = 0u32;
         let mut has_at_least_one_file = false;
 
+        // Start timing to prevent hanging during processing
+        use std::time::Instant;
+        let start_time = Instant::now();
+        let max_processing_time = std::time::Duration::from_secs(15); // 15 seconds max processing time
+
         // Check if all files are images (early exit on first non-image)
-        for i in 0..total_entries {
+        // Limit processing to first 1000 entries to avoid hanging on archives with many files
+        let limit = std::cmp::min(total_entries, 1000);
+        for i in 0..limit {
+            // Check if we've exceeded our processing time limit
+            if start_time.elapsed() > max_processing_time {
+                println!("Processing time exceeded for {}", zip_path);
+                return Ok((false, None, mod_time, Some(file_size), image_count));
+            }
+
             let file = match zip.by_index(i) {
                 Ok(f) => f,
                 Err(_) => continue,
@@ -112,6 +156,12 @@ impl ZipScanner {
                 // Found non-image file, archive is not valid
                 return Ok((false, None, mod_time, Some(file_size), image_count));
             }
+        }
+
+        // If we reached the limit without finding non-image files,
+        // check if there are more entries that weren't processed
+        if limit == 1000 && total_entries > 1000 {
+            return Ok((false, None, mod_time, Some(file_size), image_count));
         }
 
         let is_valid = has_at_least_one_file && image_count > 0;

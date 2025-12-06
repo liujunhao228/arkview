@@ -479,13 +479,28 @@ class MainApp:
 
                 batch_paths = zip_files[start:start + batch_size]
                 try:
-                    batch_results = self.zip_scanner.batch_analyze_zips(batch_paths, collect_members=False)
+                    # Process each file individually to allow interruption between files
+                    batch_results = []
+                    for zip_path in batch_paths:
+                        # Check for interruption before each file analysis
+                        if self.scan_stop_event.is_set():
+                            break
+
+                        # Analyze single file with timeout handling (now cross-platform)
+                        try:
+                            result = self.zip_scanner.analyze_zip_with_timeout(zip_path, collect_members=False, timeout=15)
+                            batch_results.append((zip_path,) + result)
+                        except Exception as e:
+                            print(f"Error analyzing {zip_path}: {e}")
+                            batch_results.append((zip_path, False, None, None, None, 0))
                 except Exception as e:
                     self._run_on_main_thread(messagebox.showerror, "Error", f"Scan error: {e}")
                     self._run_on_main_thread(self.status_label.config, text="Scan failed")
                     return
 
                 for zip_path, is_valid, members, mod_time, file_size, image_count in batch_results:
+                    if self.scan_stop_event.is_set():
+                        break
                     processed += 1
                     if is_valid:
                         pending_entries.append((zip_path, members, mod_time, file_size, image_count))
@@ -494,11 +509,15 @@ class MainApp:
                 if len(pending_entries) >= batch_size:
                     flush_pending()
 
-                if processed % ui_update_interval == 0 or processed >= total_files:
+                if processed % ui_update_interval == 0 or processed >= total_files or self.scan_stop_event.is_set():
                     self._run_on_main_thread(
                         self.status_label.config,
                         text=f"Scanning... {processed}/{total_files} files processed"
                     )
+
+                # Allow other threads to run and check for interruption
+                import time
+                time.sleep(0.01)  # 10ms sleep to allow interruption
 
             flush_pending()
 

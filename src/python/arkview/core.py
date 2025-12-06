@@ -168,9 +168,14 @@ class ZipScanner:
         Uses Rust for performance.
         """
         if RUST_AVAILABLE and self.rust_scanner:
-            return self.rust_scanner.analyze_zip(zip_path, collect_members)
-        
-        # Fallback to pure Python if Rust not available
+            try:
+                return self.rust_scanner.analyze_zip(zip_path, collect_members)
+            except Exception as e:
+                print(f"Rust scanner error for {zip_path}: {type(e).__name__} - {e}")
+                # Fall back to Python implementation if Rust fails
+                pass
+
+        # Fallback to pure Python if Rust not available or failed
         import zipfile
         mod_time: Optional[float] = None
         file_size: Optional[int] = None
@@ -181,12 +186,21 @@ class ZipScanner:
         try:
             if not os.path.exists(zip_path):
                 return False, None, None, None, 0
+
             stat_result = os.stat(zip_path)
             mod_time = stat_result.st_mtime
             file_size = stat_result.st_size
 
+            # Check for potentially huge files to avoid hanging
+            if file_size > 500 * 1024 * 1024:  # 500MB limit
+                return False, None, mod_time, file_size, 0
+
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 member_list = zip_ref.infolist()
+
+                # Check for potentially huge number of entries to avoid hanging
+                if len(member_list) > 10000:
+                    return False, None, mod_time, file_size, 0
 
                 if not member_list:
                     return False, None, mod_time, file_size, 0
@@ -194,7 +208,10 @@ class ZipScanner:
                 contains_only_images: bool = True
                 has_at_least_one_file: bool = False
 
-                for member_info in member_list:
+                # Limit processing to first 1000 entries to avoid hanging
+                limit = min(len(member_list), 1000)
+                for i in range(limit):
+                    member_info = member_list[i]
                     if member_info.is_dir():
                         continue
 
@@ -210,13 +227,70 @@ class ZipScanner:
                         all_image_members = []
                         break
 
+                # If we reached the limit without finding non-image files,
+                # check if there are more entries that weren't processed
+                if limit == 1000 and len(member_list) > 1000:
+                    return False, None, mod_time, file_size, image_count
+
                 is_valid = has_at_least_one_file and contains_only_images
 
+        except zipfile.BadZipFile:
+            print(f"Bad ZIP file: {zip_path}")
+            return False, None, mod_time, file_size, image_count
+        except zipfile.LargeZipFile:
+            print(f"ZIP file too large: {zip_path}")
+            return False, None, mod_time, file_size, image_count
+        except PermissionError:
+            print(f"Permission denied accessing: {zip_path}")
+            return False, None, mod_time, file_size, image_count
         except Exception as e:
             print(f"Analysis Error: {type(e).__name__} - {e}")
             return False, None, mod_time, file_size, image_count
 
         return is_valid, all_image_members if (is_valid and collect_members) else None, mod_time, file_size, image_count
+
+    def analyze_zip_with_timeout(
+        self,
+        zip_path: str,
+        collect_members: bool = True,
+        timeout: int = 30  # 30 seconds timeout
+    ) -> Tuple[bool, Optional[List[str]], Optional[float], Optional[int], int]:
+        """
+        Analyzes a ZIP file with timeout protection using threading for cross-platform compatibility.
+        """
+        import threading
+        from queue import Queue
+
+        result_queue = Queue()
+
+        def target():
+            try:
+                result = self.analyze_zip(zip_path, collect_members)
+                result_queue.put(('success', result))
+            except Exception as e:
+                result_queue.put(('error', (type(e).__name__, str(e))))
+
+        thread = threading.Thread(target=target)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout)
+
+        if thread.is_alive():
+            # Thread is still running, meaning it timed out
+            print(f"Timeout analyzing {zip_path}")
+            return False, None, None, None, 0
+        else:
+            try:
+                result_type, result = result_queue.get_nowait()
+                if result_type == 'success':
+                    return result
+                else:
+                    print(f"Error analyzing {zip_path}: {result[0]} - {result[1]}")
+                    return False, None, None, None, 0
+            except:
+                # Could not get result, probably cancelled
+                print(f"Cancelled analyzing {zip_path}")
+                return False, None, None, None, 0
 
     def batch_analyze_zips(
         self,
@@ -229,11 +303,13 @@ class ZipScanner:
         """
         if RUST_AVAILABLE and self.rust_scanner:
             try:
+                # For better interruption handling, we might want to process in smaller batches
+                # if we're concerned about hanging in Rust code
                 return self.rust_scanner.batch_analyze_zips(zip_paths, collect_members)
             except Exception as e:
                 print(f"Batch analysis error, falling back to sequential: {e}")
-        
-        # Fallback: sequential processing
+
+        # Fallback: sequential processing with interruption support
         results = []
         for zip_path in zip_paths:
             is_valid, members, mod_time, file_size, image_count = self.analyze_zip(zip_path, collect_members)

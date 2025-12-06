@@ -199,3 +199,11 @@ Arkview Contributors
 ## Support
 
 For issues, feature requests, or questions, please use the GitHub issue tracker.
+
+## UI Framework Options
+
+Arkview now supports two UI frameworks:
+- **tkinter** (original implementation) - run with `arkview`
+- **PySide6** (recommended for better performance) - run with `arkview-pyside`
+
+Both implementations provide identical functionality and appearance. The PySide6 version offers better performance and more modern UI rendering.
