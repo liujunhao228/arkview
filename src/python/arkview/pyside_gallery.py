@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QFrame, QScrollArea, QGridLayout, QLabel, QSizePolicy,
     QVBoxLayout, QHBoxLayout, QWidget, QScrollBar, QAbstractItemView
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread, Slot
 from PySide6.QtGui import QPixmap, QPalette, QColor
 from PIL import Image
 import PIL.ImageQt
@@ -19,6 +19,36 @@ import PIL.ImageQt
 from .core import ZipFileManager, LRUCache, load_image_data_async, _format_size
 
 
+class ThumbnailWorker(QObject):
+    """Worker object for handling thumbnail loading in a separate thread."""
+    thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
+    finished = Signal()
+    
+    def __init__(self, gallery_queue):
+        super().__init__()
+        self.gallery_queue = gallery_queue
+        self.running = True
+        
+    @Slot()
+    def processThumbnails(self):
+        """Process thumbnail loading tasks."""
+        try:
+            while self.running:
+                try:
+                    result = self.gallery_queue.get(timeout=0.1)
+                    if result:
+                        self.thumbnailLoaded.emit(result, getattr(result, 'cache_key', None))
+                except queue.Empty:
+                    # Timeout, continue loop
+                    continue
+                except Exception as e:
+                    print(f"Error processing thumbnail: {e}")
+        except Exception as e:
+            print(f"Fatal error in thumbnail worker: {e}")
+        finally:
+            self.finished.emit()
+        
+        
 class GalleryView(QFrame):
     """Gallery view component with mobile-like UX and modern design."""
 
@@ -66,10 +96,34 @@ class GalleryView(QFrame):
         self._visible_items_range = (0, 0)
         self._last_canvas_y = 0
 
+        # Setup threaded thumbnail loading
+        self.thumbnail_thread = QThread()
+        self.thumbnail_worker = ThumbnailWorker(self.gallery_queue)
+        self.thumbnail_worker.moveToThread(self.thumbnail_thread)
+        self.thumbnail_worker.thumbnailLoaded.connect(self._handle_thumbnail_result_slot)
+        self.thumbnail_thread.started.connect(self.thumbnail_worker.processThumbnails)
+        self.thumbnail_thread.start()
+
+        # Add cleanup connection
+        self.destroyed.connect(self._cleanup_worker)
+
         self._setup_ui()
         
         # Apply dark theme
         self._apply_dark_theme()
+
+    @Slot(object, tuple)
+    def _handle_thumbnail_result_slot(self, result, cache_key):
+        """Handle thumbnail result from worker thread."""
+        self._handle_thumbnail_result(result, cache_key)
+
+    def _cleanup_worker(self):
+        """Clean up worker thread resources."""
+        if hasattr(self, 'thumbnail_worker'):
+            self.thumbnail_worker.running = False
+        if hasattr(self, 'thumbnail_thread'):
+            self.thumbnail_thread.quit()
+            self.thumbnail_thread.wait(1000)  # Wait up to 1 second
 
     def _apply_dark_theme(self):
         """Apply dark theme to the gallery view."""
@@ -360,59 +414,26 @@ class GalleryView(QFrame):
         QTimer.singleShot(50, self._process_gallery_thumbnail_queue)
 
     def _process_gallery_thumbnail_queue(self):
-        """Process gallery thumbnail results from worker threads."""
-        self._gallery_thumbnail_after_id = None
-        processed_count = 0
+        """Process any pending gallery thumbnail requests."""
+        # This method serves as a placeholder since the actual processing
+        # happens in the worker thread connected to the thumbnailLoaded signal
+        pass
 
-        try:
-            while processed_count < 30:
-                try:
-                    result = self.gallery_queue.get_nowait()
-                except queue.Empty:
-                    break
-
-                # Extract card key from result
-                card_key = self._extract_card_key_from_result(result)
-
-                if not card_key:
-                    processed_count += 1
-                    continue
-
-                label = self.gallery_thumb_labels.get(card_key)
-                if not label:
-                    processed_count += 1
-                    continue
-
-                # Handle thumbnail result
-                self._handle_thumbnail_result(result, card_key, label)
-
-                # Clean up request record
-                self._cleanup_thumbnail_request(result)
-
-                processed_count += 1
-
-        except Exception as e:
-            print(f"Error processing thumbnail queue: {e}")
-
-        # Continue polling if there are more requests or we processed items
-        if self.gallery_thumbnail_requests or processed_count > 0:
-            self._schedule_gallery_thumbnail_poll()
-
-    def _extract_card_key_from_result(self, result):
-        """Extract card key from a thumbnail result."""
-        if isinstance(result.cache_key, tuple):
-            if len(result.cache_key) == 2:
-                # Gallery view: (zip_path, member_path)
-                if not isinstance(result.cache_key[0], tuple):
-                    return self.gallery_thumbnail_requests.get(result.cache_key)
-                # Album view: ((zip_path, member_path), card_key) - Not implemented in this version yet
-                else:
-                    return result.cache_key[1]
-        return None
-
-    def _handle_thumbnail_result(self, result, card_key, label):
+    def _handle_thumbnail_result(self, result, cache_key):
         """Process a single thumbnail result."""
-        if result.success and result.data:
+        if not result or not cache_key:
+            return
+            
+        # Extract card key from cache_key
+        card_key = self._extract_card_key_from_result(type('obj', (object,), {'cache_key': cache_key}))
+        if not card_key:
+            return
+
+        label = self.gallery_thumb_labels.get(card_key)
+        if not label:
+            return
+
+        if hasattr(result, 'success') and result.success and hasattr(result, 'data') and result.data:
             try:
                 # Convert PIL image to QPixmap
                 qimage = PIL.ImageQt.ImageQt(result.data)
@@ -426,6 +447,22 @@ class GalleryView(QFrame):
                 self._set_error_thumbnail(label)
         else:
             self._set_error_thumbnail(label)
+
+        # Clean up request record
+        self._cleanup_thumbnail_request(type('obj', (object,), {'cache_key': cache_key}))
+
+    def _extract_card_key_from_result(self, result):
+        """Extract card key from a thumbnail result."""
+        if isinstance(result.cache_key, tuple):
+            if len(result.cache_key) == 2:
+                # Gallery view: (zip_path, member_path)
+                if not isinstance(result.cache_key[0], tuple):
+                    return self.gallery_thumbnail_requests.get(result.cache_key)
+                # Album view: ((zip_path, member_path), card_key) - Not implemented in this version yet
+                else:
+                    return result.cache_key[1]
+        return None
+
 
     def _set_error_thumbnail(self, label):
         """Display an error thumbnail."""

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (
     Qt, QTimer, Signal, QObject, QThread, QMutex, QMutexLocker, QEvent,
-    QSize, QPoint, QRect, QUrl, QMetaObject, Q_ARG
+    QSize, QPoint, QRect, QUrl, QMetaObject, Q_ARG, Slot
 )
 from PySide6.QtGui import (
     QAction, QKeySequence, QPixmap, QIcon, QPalette, QColor, QFont,
@@ -90,6 +90,22 @@ def parse_human_size(size_str: str) -> Optional[int]:
     return int(value * multiplier)
 
 
+class ThumbnailLoader(QObject):
+    """Dedicated QObject for handling thumbnail loading operations."""
+    thumbnailLoaded = Signal(object, str, str)  # result, zip_path, member_name
+    batchProcessed = Signal(int, int)  # processed, total
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.loader_thread = QThread()
+        self.moveToThread(self.loader_thread)
+        self.loader_thread.start()
+        
+    def stop(self):
+        self.loader_thread.quit()
+        self.loader_thread.wait()
+
+
 class MainApp(QMainWindow):
     """Main Arkview Application with PySide UI."""
     
@@ -98,6 +114,8 @@ class MainApp(QMainWindow):
     update_preview = Signal(object)  # (pil_image, str_error)
     add_zip_entries_signal = Signal(list)  # List of tuples for bulk adding
     show_error_signal = Signal(str, str)  # (title, message)
+    scan_progress = Signal(int, int)  # processed, total
+    scan_completed = Signal(int, int)  # valid_count, total_processed
     
     def __init__(self):
         super().__init__()
@@ -111,6 +129,11 @@ class MainApp(QMainWindow):
         self.cache = LRUCache(CONFIG["CACHE_MAX_ITEMS_NORMAL"])
         self.preview_queue: queue.Queue = queue.Queue()
         self.thread_pool = ThreadPoolExecutor(max_workers=CONFIG["THREAD_POOL_WORKERS"])
+
+        # Create thumbnail loader for dedicated thread operations
+        self.thumbnail_loader = ThumbnailLoader()
+        self.thumbnail_loader.thumbnailLoaded.connect(self.onThumbnailLoaded)
+        self.thumbnail_loader.batchProcessed.connect(self.onBatchProcessed)
 
         self.app_settings: Dict[str, Any] = {
             'performance_mode': False,
@@ -142,6 +165,8 @@ class MainApp(QMainWindow):
         self.update_preview.connect(self._on_update_preview)
         self.add_zip_entries_signal.connect(self._add_zip_entries_bulk)
         self.show_error_signal.connect(self._show_error)
+        self.scan_progress.connect(self._on_scan_progress)
+        self.scan_completed.connect(self._on_scan_completed)
         
         # Set dark theme
         self._apply_dark_theme()
@@ -695,10 +720,8 @@ class MainApp(QMainWindow):
                     flush_pending()
 
                 if processed % ui_update_interval == 0 or processed >= total_files:
-                    # Use signal to call from main thread
-                    current_processed = processed
-                    current_total = total_files
-                    self.update_status.emit(f"Scanning... {current_processed}/{current_total} files processed")
+                    # Emit signal for progress updates
+                    self.scan_progress.emit(processed, total_files)
 
             flush_pending()
 
@@ -708,6 +731,8 @@ class MainApp(QMainWindow):
             )
             # Use signal to call from main thread
             self.update_status.emit(final_message)
+            # Emit completion signal
+            self.scan_completed.emit(valid_found, processed)
         except Exception as e:
             self.show_error_signal.emit("Error", f"Scan error: {e}")
             self.update_status.emit("Scan failed")
@@ -836,25 +861,34 @@ class MainApp(QMainWindow):
             self._reset_preview()
             return
 
-        zip_path = zip_entries[index]
-        self.current_selected_zip = zip_path
+        selected_zip = zip_entries[index]
+        self.current_selected_zip = selected_zip
+        _, mod_time, file_size, image_count = self.zip_files[selected_zip]
+        self._update_details(selected_zip, mod_time, file_size, image_count)
 
-        entry = self.zip_files[zip_path]
-        members, mod_time, file_size, image_count = entry
+        # Load preview for first image if available
+        entry = self.zip_files[selected_zip]
+        members = entry[0]
+        if members and len(members) > 0:
+            self._load_preview(selected_zip, members, 0)
+        else:
+            # Load members in background if not loaded yet
+            self.thread_pool.submit(self._ensure_members_loaded, selected_zip)
+            self._reset_preview("Loading archive contents...")
 
-        if members is None:
-            members = self._ensure_members_loaded(zip_path)
-            if not members:
-                self._reset_preview("No images found")
-                return
-            members, mod_time, file_size, image_count = self.zip_files[zip_path]
+    def _on_scan_progress(self, processed: int, total: int):
+        """Handle scan progress updates."""
+        if total > 0:
+            progress_percent = (processed / total) * 100
+            self.status_label.setText(f"Scanning... {processed}/{total} ({progress_percent:.1f}%)")
+        else:
+            self.status_label.setText(f"Scanning... {processed} files processed")
 
-        if not members:
-            self._reset_preview("No images found")
-            return
-
-        self._update_details(zip_path, mod_time, file_size, image_count)
-        self._load_preview(zip_path, members, 0)
+    def _on_scan_completed(self, valid_count: int, total_processed: int):
+        """Handle scan completion."""
+        self.status_label.setText(f"Scan completed: {valid_count} valid archives found out of {total_processed} total files")
+        if self.gallery_widget and self.current_view == "gallery":
+            self._refresh_gallery()
 
     def _ensure_members_loaded(self, zip_path: str) -> Optional[List[str]]:
         """Ensure members list is loaded for a ZIP file."""
@@ -874,7 +908,10 @@ class MainApp(QMainWindow):
 
     def _update_details(self, zip_path: str, mod_time: float, file_size: int, image_count: int):
         """Update the details panel."""
-        details = f"Archive: {os.path.basename(zip_path)}\n"
+        if zip_path is None:
+            details = "Archive: Unknown\n"
+        else:
+            details = f"Archive: {os.path.basename(zip_path)}\n"
         details += f"Images: {image_count}\n"
         details += f"Size: {_format_size(file_size)}\n"
         if mod_time:
@@ -1106,10 +1143,34 @@ Archive browsing and image preview utility.
 BSD-2-Clause License"""
         QMessageBox.about(self, "About Arkview", about_text)
 
+    def onThumbnailLoaded(self, result, zip_path: str, member_name: str):
+        """Handle thumbnail loaded signal from thumbnail loader."""
+        # Add result to gallery queue if gallery view exists and is active
+        if self.gallery_widget and self.current_view == "gallery":
+            # The gallery widget expects results to be put in its queue for processing
+            # Create a result object with the expected structure
+            try:
+                # Create a cache key that matches what the gallery expects
+                cache_key = (zip_path, member_name)
+                if hasattr(result, 'cache_key'):
+                    result.cache_key = cache_key
+                self.gallery_widget.gallery_queue.put(result)
+            except Exception:
+                # Fallback: just update the gallery
+                pass
+
+    def onBatchProcessed(self, processed: int, total: int):
+        """Handle batch processed signal from thumbnail loader."""
+        # Update scan progress
+        self.scan_progress.emit(processed, total)
+
     def closeEvent(self, event):
         """Handle application closing."""
         self.scan_stop_event.set()
         self.zip_manager.close_all()
+        # Stop the thumbnail loader thread
+        if hasattr(self, 'thumbnail_loader'):
+            self.thumbnail_loader.stop()
         self.thread_pool.shutdown(wait=False)
         event.accept()
 
