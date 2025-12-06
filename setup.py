@@ -16,9 +16,9 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "Pillow>=9.0.0",
+        "PySide6>=6.5.0",
     ],
     extras_require={
-        "dnd": ["tkinterdnd2>=0.3.0"],
         "dev": ["pytest>=7.0"],
     },
     entry_points={

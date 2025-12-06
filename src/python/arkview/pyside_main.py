@@ -154,6 +154,7 @@ class MainApp(QMainWindow):
 
         self.current_view = "explorer"  # "explorer" or "gallery"
         self.gallery_widget: Optional[GalleryView] = None
+        self._zip_selection_connected = False  # Track connection state of zip selection signal
 
         # Set up the UI
         self._setup_ui()
@@ -167,6 +168,9 @@ class MainApp(QMainWindow):
         self.show_error_signal.connect(self._show_error)
         self.scan_progress.connect(self._on_scan_progress)
         self.scan_completed.connect(self._on_scan_completed)
+        
+        # Initialize flags
+        self._zip_selection_connected = False
         
         # Set dark theme
         self._apply_dark_theme()
@@ -653,8 +657,20 @@ class MainApp(QMainWindow):
 
     def _refresh_gallery(self):
         """Refresh gallery view if visible."""
+        print(f"[DEBUG] Refreshing gallery, current view: {self.current_view}")
+        print(f"[DEBUG] Gallery widget exists: {self.gallery_widget is not None}")
         if self.gallery_widget and self.current_view == "gallery":
-            self.gallery_widget.populate()
+            print("[DEBUG] Calling gallery populate")
+            try:
+                self.gallery_widget.populate()
+            except Exception as e:
+                print(f"[ERROR] Error populating gallery: {e}")
+        else:
+            print("[DEBUG] Gallery not visible or widget not initialized")
+            if not self.gallery_widget:
+                print("[DEBUG] Gallery widget is None")
+            if self.current_view != "gallery":
+                print(f"[DEBUG] Current view is {self.current_view}, not 'gallery'")
 
     def _scan_directory(self):
         """Scan a directory for ZIP files."""
@@ -781,12 +797,15 @@ class MainApp(QMainWindow):
 
     def _add_zip_entries_bulk(self, entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]]):
         """Add multiple ZIP files to the list in a batch (more efficient)."""
+        print(f"[DEBUG] Adding {len(entries)} entries in bulk")
         if not entries:
+            print("[DEBUG] No entries to add")
             return
 
         display_items = []
         for zip_path, members, mod_time, file_size, image_count in entries:
             if zip_path in self.zip_files:
+                print(f"[DEBUG] Skipping {zip_path}, already in zip_files")
                 continue
 
             resolved_members = members
@@ -795,13 +814,17 @@ class MainApp(QMainWindow):
             resolved_image_count = image_count
 
             if resolved_members is None and resolved_image_count is None:
+                print(f"[DEBUG] Analyzing zip {zip_path} (full analysis)")
                 is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
                 if not is_valid or not resolved_members:
+                    print(f"[DEBUG] Invalid or empty zip: {zip_path}")
                     continue
             elif resolved_members is None and (resolved_mod_time is None or resolved_file_size is None):
                 # Need complete metadata for display
+                print(f"[DEBUG] Analyzing zip {zip_path} (metadata only)")
                 is_valid, resolved_members, resolved_mod_time, resolved_file_size, resolved_image_count = self.zip_scanner.analyze_zip(zip_path)
                 if not is_valid:
+                    print(f"[DEBUG] Invalid zip: {zip_path}")
                     continue
 
             if resolved_image_count is None:
@@ -811,6 +834,7 @@ class MainApp(QMainWindow):
             entry_file_size = resolved_file_size or 0
 
             self.zip_files[zip_path] = (resolved_members, entry_mod_time, entry_file_size, resolved_image_count)
+            print(f"[DEBUG] Added {zip_path} to zip_files with {resolved_image_count} images")
 
             display_text = os.path.basename(zip_path)
             if entry_file_size:
@@ -818,18 +842,22 @@ class MainApp(QMainWindow):
             display_items.append(display_text)
 
         if display_items:
+            print(f"[DEBUG] Adding {len(display_items)} items to listbox")
             for item_text in display_items:
                 item = QListWidgetItem(item_text)
                 self.zip_listbox.addItem(item)
 
+        print("[DEBUG] Refreshing gallery")
         self._refresh_gallery()
 
-        # Connect selection event if not already connected
-        try:
+        # Disconnect and reconnect selection event to avoid duplicates
+        # Use a flag to track connection state instead of relying on exception handling
+        if hasattr(self, '_zip_selection_connected') and self._zip_selection_connected:
             self.zip_listbox.itemSelectionChanged.disconnect(self._on_zip_selected)
-        except:
-            pass  # Already disconnected
+        
         self.zip_listbox.itemSelectionChanged.connect(self._on_zip_selected)
+        self._zip_selection_connected = True
+        print("[DEBUG] Finished adding entries in bulk")
 
     def _on_update_status(self, message: str):
         """Update status bar (thread-safe)."""

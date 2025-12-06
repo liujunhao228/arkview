@@ -14,11 +14,10 @@ dependencies = [
     "Pillow>=9.0.0",
     "PySide6>=6.5.0",
 ]
-optional-dependencies = {"dnd" = ["tkinterdnd2>=0.3.0"],"dev" = ["pytest>=7.0"]}
+optional-dependencies = {"dev" = ["pytest>=7.0"]}
 
 [project.scripts]
 arkview = "arkview.main:main"
-arkview-pyside = "arkview.pyside_main:main"
 
 [tool.maturin]
 python-source = "src/python"

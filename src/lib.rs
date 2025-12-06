@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use image::io::Reader as ImageReader;
 use image::GenericImageView;
 
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -232,7 +231,13 @@ impl ImageProcessor {
         let final_width = if new_width > max_width { max_width } else { new_width };
         let final_height = (final_width as f32 / aspect_ratio) as u32;
 
-        let img = img.thumbnail(final_width, final_height);
+        let img = if fast_mode {
+            // 使用更快的采样算法
+            img.thumbnail(final_width, final_height)
+        } else {
+            // 使用默认质量的采样算法
+            img.resize(final_width, final_height, image::imageops::FilterType::Lanczos3)
+        };
 
         let mut thumb_data = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut thumb_data), image::ImageFormat::Png)
@@ -285,7 +290,7 @@ fn format_size(size_bytes: u64) -> String {
 }
 
 #[pymodule]
-fn arkview_core(_py: Python, m: &PyModule) -> PyResult<()> {
+fn arkview_core(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ZipScanner>()?;
     m.add_class::<ImageProcessor>()?;
     m.add_function(wrap_pyfunction!(format_size, m)?)?;

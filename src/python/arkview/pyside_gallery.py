@@ -381,8 +381,8 @@ class GalleryView(QFrame):
             self.app_settings['performance_mode']
         )
 
-        # Start polling if not already running
-        self._schedule_gallery_thumbnail_poll()
+        # With our threaded approach, we don't need explicit polling scheduling
+        # The worker thread will emit signals when thumbnails are ready
 
     def _request_gallery_thumbnail_for_unloaded_members(self, zip_path: str):
         """Request thumbnail for a ZIP file with unloaded members."""
@@ -404,14 +404,10 @@ class GalleryView(QFrame):
 
     def _schedule_gallery_thumbnail_poll(self):
         """Schedule thumbnail polling with debouncing."""
-        # Cancel previous schedule
-        if self._gallery_thumbnail_after_id is not None:
-            # In PySide, we'd use the QTimer's killTimer method or singleShot with unique IDs
-            # For simplicity, we'll just use a direct callback
-            pass
-
-        # Schedule processing with a delay to combine rapid requests
-        QTimer.singleShot(50, self._process_gallery_thumbnail_queue)
+        # We don't need to do anything here anymore because we're using a dedicated 
+        # worker thread that processes results as they come in through signals
+        # This approach is safer than trying to use QTimer from arbitrary threads
+        pass
 
     def _process_gallery_thumbnail_queue(self):
         """Process any pending gallery thumbnail requests."""

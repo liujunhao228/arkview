@@ -8,7 +8,7 @@ name = "arkview_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.20", features = ["extension-module"] }
+pyo3 = { version = "0.25", features = ["extension-module"] }
 zip = "0.6"
 image = "0.24"
 rayon = "1.7"
