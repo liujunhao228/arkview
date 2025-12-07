@@ -1,14 +1,40 @@
 """
-Arkview - High-Performance Archived Image Viewer
-Hybrid Rust-Python Architecture
+Arkview - A high-performance image browser for viewing images inside ZIP archives.
 """
 
 __version__ = "4.0.0"
 
-try:
-    from . import arkview_core
-    RUST_AVAILABLE = True
-except ImportError:
-    RUST_AVAILABLE = False
+# Expose main UI components
+from .ui.main_window import MainWindow
+from .ui.gallery_view import GalleryView
+from .ui.viewer_window import ImageViewerWindow
+from .ui.dialogs import SettingsDialog, AboutDialog
 
-__all__ = ["RUST_AVAILABLE"]
+# Expose services
+from .services.zip_service import ZipService
+from .services.image_service import ImageService
+from .services.thumbnail_service import ThumbnailService
+from .services.config_service import ConfigService
+from .services.cache_service import CacheService
+
+# Expose core components
+from .core.cache import LRUCache
+from .core.file_manager import ZipFileManager
+from .core.models import LoadResult, ZipFileInfo
+
+__all__ = [
+    "MainWindow",
+    "GalleryView", 
+    "ImageViewerWindow",
+    "SettingsDialog",
+    "AboutDialog",
+    "ZipService",
+    "ImageService",
+    "ThumbnailService",
+    "ConfigService",
+    "CacheService",
+    "LRUCache",
+    "ZipFileManager",
+    "LoadResult",
+    "ZipFileInfo"
+]

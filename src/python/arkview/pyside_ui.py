@@ -1,6 +1,19 @@
 """
-PySide UI components for Arkview.
+DEPRECATED: This file is deprecated and replaced by the new layered architecture.
+
+The new architecture separates concerns into distinct layers:
+- UI Layer: ui/dialogs.py, ui/viewer_window.py
+- Service Layer: services/*.py
+- Core Layer: core/*.py
+
+Please use the new modules instead.
 """
+
+import warnings
+warnings.warn("pyside_ui.py is deprecated, use ui/dialogs.py and ui/viewer_window.py instead", DeprecationWarning)
+
+# Preserve the old interface for backward compatibility if needed
+# Note: This file is now just a placeholder and should not be used in new code
 
 import os
 import platform

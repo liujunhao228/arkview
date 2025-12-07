@@ -1,4 +1,21 @@
 """
+DEPRECATED: This file is deprecated and replaced by the new layered architecture.
+
+The new architecture separates concerns into distinct layers:
+- UI Layer: ui/gallery_view.py
+- Service Layer: services/*.py
+- Core Layer: core/*.py
+
+Please use the new modules instead.
+"""
+
+import warnings
+warnings.warn("pyside_gallery.py is deprecated, use ui/gallery_view.py instead", DeprecationWarning)
+
+# Preserve the old interface for backward compatibility if needed
+# Note: This file is now just a placeholder and should not be used in new code
+
+"""
 Gallery View for Arkview - PySide Implementation
 """
 

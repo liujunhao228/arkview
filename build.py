@@ -1,59 +1,79 @@
 #!/usr/bin/env python3
 """
-Arkview 构建和打包脚本
-支持多种打包方式，包括PyInstaller和cx_Freeze
+Build script for Arkview
+Supports building wheel packages and standalone executables
 """
 
-import subprocess
-import sys
 import os
+import sys
 import shutil
+import subprocess
 from pathlib import Path
 
-def run_command(cmd, cwd=None, check=True):
-    """运行命令并检查返回码"""
-    print(f"运行命令: {' '.join(cmd)}")
-    try:
-        result = subprocess.run(cmd, cwd=cwd, check=check)
-        return result.returncode == 0
-    except subprocess.CalledProcessError as e:
-        print(f"命令执行失败: {' '.join(cmd)}")
-        if check:
-            sys.exit(1)
-        return False
-
-def clean_build_artifacts():
-    """清理之前的构建产物"""
-    print("清理构建产物...")
-    dirs_to_clean = ["build", "dist"]
-    for dir_name in dirs_to_clean:
-        if os.path.exists(dir_name):
-            shutil.rmtree(dir_name)
-            print(f"已删除 {dir_name} 目录")
 
 def build_rust_extension():
-    """构建Rust扩展"""
-    print("构建Rust扩展...")
-    return run_command(["maturin", "develop", "--release"])
-
-def build_with_pyinstaller():
-    """使用PyInstaller构建独立可执行文件"""
-    print("使用PyInstaller构建独立可执行文件...")
+    """Build the Rust extension using maturin"""
+    print("Building Rust extension with maturin...")
     
-    # 首先确保Rust扩展已构建
+    # Ensure we're in the project root
+    project_root = Path(__file__).parent.absolute()
+    os.chdir(project_root)
+    
+    # Run maturin develop to build the extension
+    try:
+        result = subprocess.run([
+            sys.executable, "-m", "maturin", "develop"
+        ], check=True, capture_output=True, text=True)
+        print("Rust extension built successfully!")
+        print(result.stdout)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error building Rust extension: {e}")
+        print(f"stdout: {e.stdout}")
+        print(f"stderr: {e.stderr}")
+        return False
+
+
+def build_wheel():
+    """Build wheel package using maturin"""
+    print("Building wheel package with maturin...")
+    
+    # First ensure Rust extension is built
     if not build_rust_extension():
-        print("Rust扩展构建失败!")
+        print("Rust extension build failed!")
         return False
     
-    # 获取项目根目录
+    # Run maturin build
+    try:
+        subprocess.run([
+            sys.executable, "-m", "maturin", "build", "--release"
+        ], check=True)
+        print("Wheel package built successfully!")
+        print("Output files are in the 'target/wheels' directory")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error building wheel package: {e}")
+        return False
+
+
+def build_with_pyinstaller_exe():
+    """Use PyInstaller to build standalone executable (single file)"""
+    print("Building standalone executable with PyInstaller (single file)...")
+    
+    # First ensure Rust extension is built
+    if not build_rust_extension():
+        print("Rust extension build failed!")
+        return False
+    
+    # Get project root directory
     project_root = Path(__file__).parent.absolute()
     
-    # 创建临时入口脚本
+    # Create temporary entry script
     entry_script = project_root / "entry_for_packaging.py"
     with open(entry_script, "w", encoding="utf-8") as f:
         f.write('''#!/usr/bin/env python3
 """
-Arkview入口脚本，用于PyInstaller打包
+Arkview entry script for PyInstaller packaging
 """
 
 import sys
@@ -61,73 +81,83 @@ import os
 
 def main():
     try:
-        # 尝试相对导入（开发环境）
-        from arkview.pyside_main import main as arkview_main
+        # Try relative import (development environment)
+        from arkview.ui.main_window import MainWindow
     except ImportError:
-        # 如果失败，尝试绝对导入（打包环境）
+        # If that fails, try absolute import (packaged environment)
         try:
-            import arkview.pyside_main
-            arkview_main = arkview.pyside_main.main
+            from ui.main_window import MainWindow
         except ImportError as e:
-            print(f"无法导入Arkview主模块: {e}")
+            print(f"Cannot import Arkview main window: {e}")
             sys.exit(1)
     
-    # 运行主程序
-    arkview_main()
+    # Import required modules
+    from PySide6.QtWidgets import QApplication
+    import sys
+    
+    # Create and run the application
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    
+    main_window = MainWindow()
+    main_window.show()
+    
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
 ''')
-    
-    # 使用PyInstaller打包
+
+    # Use PyInstaller to package
     try:
         pyinstaller_cmd = [
             sys.executable, "-m", "PyInstaller",
             "--name", "arkview",
-            "--windowed",  # GUI应用不需要控制台窗口
-            "--onefile",   # 打包成单个文件
-            "--add-data", f"{project_root / 'README.md'}{os.pathsep}.",  # 添加README文件
-            "--hidden-import", "PySide6.QtXml",  # 确保包含必要的Qt模块
+            "--windowed",  # GUI app doesn't need console window
+            "--onefile",   # Package as single file
+            "--add-data", f"{project_root / 'README.md'}{os.pathsep}.",  # Add README file
+            "--hidden-import", "PySide6.QtXml",  # Ensure necessary Qt modules are included
             "--hidden-import", "PIL._tkinter_finder",
             str(entry_script)
         ]
-        
-        print("正在使用PyInstaller打包...")
+
+        print("Packaging with PyInstaller...")
         if not run_command(pyinstaller_cmd):
             return False
-            
-        print("PyInstaller打包完成!")
-        print("可执行文件位于 dist/arkview.exe (Windows) 或 dist/arkview (Linux/macOS)")
-        
-        # 复制README到dist目录
+
+        print("PyInstaller packaging completed!")
+        print("Executable file is located at dist/arkview.exe (Windows) or dist/arkview (Linux/macOS)")
+
+        # Copy README to dist directory
         dist_readme = Path("dist") / "README.md"
         if not dist_readme.exists():
             shutil.copy(project_root / "README.md", dist_readme)
-            
+
         return True
     finally:
-        # 清理临时文件
+        # Clean up temporary file
         if entry_script.exists():
             entry_script.unlink()
 
+
 def build_with_pyinstaller_dir():
-    """使用PyInstaller构建独立可执行文件(目录模式)"""
-    print("使用PyInstaller构建独立可执行文件(目录模式)...")
-    
-    # 首先确保Rust扩展已构建
+    """Use PyInstaller to build standalone executable (directory mode)"""
+    print("Building standalone executable with PyInstaller (directory mode)...")
+
+    # First ensure Rust extension is built
     if not build_rust_extension():
-        print("Rust扩展构建失败!")
+        print("Rust extension build failed!")
         return False
-    
-    # 获取项目根目录
+
+    # Get project root directory
     project_root = Path(__file__).parent.absolute()
-    
-    # 创建临时入口脚本
+
+    # Create temporary entry script
     entry_script = project_root / "entry_for_packaging.py"
     with open(entry_script, "w", encoding="utf-8") as f:
         f.write('''#!/usr/bin/env python3
 """
-Arkview入口脚本，用于PyInstaller打包
+Arkview entry script for PyInstaller packaging
 """
 
 import sys
@@ -135,90 +165,100 @@ import os
 
 def main():
     try:
-        # 尝试相对导入（开发环境）
-        from arkview.pyside_main import main as arkview_main
+        # Try relative import (development environment)
+        from arkview.ui.main_window import MainWindow
     except ImportError:
-        # 如果失败，尝试绝对导入（打包环境）
+        # If that fails, try absolute import (packaged environment)
         try:
-            import arkview.pyside_main
-            arkview_main = arkview.pyside_main.main
+            from ui.main_window import MainWindow
         except ImportError as e:
-            print(f"无法导入Arkview主模块: {e}")
+            print(f"Cannot import Arkview main window: {e}")
             sys.exit(1)
     
-    # 运行主程序
-    arkview_main()
+    # Import required modules
+    from PySide6.QtWidgets import QApplication
+    import sys
+    
+    # Create and run the application
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    
+    main_window = MainWindow()
+    main_window.show()
+    
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
 ''')
-    
-    # 使用PyInstaller打包为目录
+
+    # Use PyInstaller to package
     try:
         pyinstaller_cmd = [
             sys.executable, "-m", "PyInstaller",
             "--name", "arkview",
-            "--windowed",  # GUI应用不需要控制台窗口
-            "--onedir",    # 打包成目录
-            "--add-data", f"{project_root / 'README.md'}{os.pathsep}.",  # 添加README文件
-            "--hidden-import", "PySide6.QtXml",  # 确保包含必要的Qt模块
+            "--windowed",  # GUI app doesn't need console window
+            "--onedir",    # Package as directory
+            "--add-data", f"{project_root / 'README.md'}{os.pathsep}.",  # Add README file
+            "--hidden-import", "PySide6.QtXml",  # Ensure necessary Qt modules are included
             "--hidden-import", "PIL._tkinter_finder",
             str(entry_script)
         ]
-        
-        print("正在使用PyInstaller打包...")
+
+        print("Packaging with PyInstaller...")
         if not run_command(pyinstaller_cmd):
             return False
-            
-        print("PyInstaller打包完成!")
-        print("可执行文件位于 dist/arkview/")
-        
-        # 复制README到dist目录
+
+        print("PyInstaller packaging completed!")
+        print("Executable directory is located at dist/arkview/")
+
+        # Copy README to dist directory
         dist_dir = Path("dist") / "arkview"
         dist_readme = dist_dir / "README.md"
         if not dist_readme.exists():
+            dist_dir.mkdir(exist_ok=True)
             shutil.copy(project_root / "README.md", dist_readme)
-            
+
         return True
     finally:
-        # 清理临时文件
+        # Clean up temporary file
         if entry_script.exists():
             entry_script.unlink()
 
-def build_wheel():
-    """使用maturin构建wheel包"""
-    print("使用maturin构建wheel包...")
-    clean_build_artifacts()
-    return run_command(["maturin", "build", "--release"])
+
+def run_command(cmd):
+    """Run command and handle errors"""
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print(result.stdout)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Command failed: {e}")
+        print(f"stdout: {e.stdout}")
+        print(f"stderr: {e.stderr}")
+        return False
+
 
 def main():
     if len(sys.argv) < 2:
-        print("使用方法:")
-        print("  python build.py clean         - 清理构建产物")
-        print("  python build.py exe           - 构建独立可执行文件(单文件)")
-        print("  python build.py dir           - 构建独立可执行文件(目录模式)")
-        print("  python build.py wheel         - 构建wheel包")
-        print("  python build.py all           - 构建所有包")
-        sys.exit(1)
-    
-    if sys.argv[1] == "clean":
-        clean_build_artifacts()
-    elif sys.argv[1] == "exe":
-        if not build_with_pyinstaller():
-            sys.exit(1)
-    elif sys.argv[1] == "dir":
-        if not build_with_pyinstaller_dir():
-            sys.exit(1)
-    elif sys.argv[1] == "wheel":
-        if not build_wheel():
-            sys.exit(1)
-    elif sys.argv[1] == "all":
-        success = build_wheel() and build_with_pyinstaller() and build_with_pyinstaller_dir()
-        if not success:
-            sys.exit(1)
+        print("Usage:")
+        print("  python build.py wheel    # Build wheel package")
+        print("  python build.py exe      # Build standalone executable (single file)")
+        print("  python build.py dir      # Build standalone executable (directory)")
+        return
+
+    command = sys.argv[1].lower()
+
+    if command == "wheel":
+        build_wheel()
+    elif command == "exe":
+        build_with_pyinstaller_exe()
+    elif command == "dir":
+        build_with_pyinstaller_dir()
     else:
-        print("未知参数，请使用 'clean'、'exe'、'dir'、'wheel' 或 'all'")
-        sys.exit(1)
+        print(f"Unknown command: {command}")
+        print("Supported commands: wheel, exe, dir")
+
 
 if __name__ == "__main__":
     main()
