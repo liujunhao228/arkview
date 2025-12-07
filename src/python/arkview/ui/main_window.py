@@ -45,7 +45,8 @@ from ..ui.gallery_view import GalleryView
 # Import core components that don't contain business logic
 from ..core.cache import LRUCache
 from ..core.file_manager import ZipFileManager
-from ..core.models import LoadResult, _format_size
+from ..core.models import LoadResult
+from ..core import _format_size
 
 
 class MainWindow(QMainWindow):
