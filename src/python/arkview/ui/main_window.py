@@ -157,8 +157,7 @@ class MainWindow(QMainWindow):
         self.central_widget = QFrame()
         self.layout = QVBoxLayout(self.central_widget)
         self.layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Create welcome label
+
         self.welcome_label = QLabel("Welcome to Arkview!\n\nDrop a folder here to begin.")
         self.welcome_label.setAlignment(Qt.AlignCenter)
         self.welcome_label.setStyleSheet("""
@@ -171,9 +170,25 @@ class MainWindow(QMainWindow):
                 padding: 40px;
             }
         """)
-        
+
         self.layout.addWidget(self.welcome_label)
         self.setCentralWidget(self.central_widget)
+
+        self.drag_overlay = QLabel("Drop folders or archives to load", self.central_widget)
+        self.drag_overlay.setAlignment(Qt.AlignCenter)
+        self.drag_overlay.setStyleSheet("""
+            QLabel {
+                background-color: rgba(26, 115, 232, 0.15);
+                border: 2px dashed #1a73e8;
+                color: #1a73e8;
+                font-size: 18px;
+                font-weight: 600;
+                border-radius: 12px;
+            }
+        """)
+        self.drag_overlay.hide()
+        self.central_widget.installEventFilter(self)
+        self._update_drag_overlay_geometry()
         
     def _setup_status_bar(self):
         """Setup the status bar."""
@@ -269,8 +284,17 @@ class MainWindow(QMainWindow):
         
     def _on_selection_changed(self, zip_path: str, members: List[str], index: int):
         """Handle selection change in gallery view."""
-        # This could show a preview or update status
-        self.status_bar.showMessage(f"Selected {Path(zip_path).name} | {index + 1}/{len(members)}")
+        if not zip_path:
+            self.status_bar.showMessage("Selection cleared")
+            return
+
+        if not members:
+            self.status_bar.showMessage(f"Selected {Path(zip_path).name}")
+            return
+
+        total = len(members)
+        current = min(total, index + 1)
+        self.status_bar.showMessage(f"Selected {Path(zip_path).name} | {current}/{total}")
         
     def _open_viewer(self, zip_path: str, members: List[str], index: int):
         """Open the image viewer."""
@@ -332,17 +356,42 @@ class MainWindow(QMainWindow):
         
         self.status_bar.showMessage("Settings applied")
         
+    def eventFilter(self, obj, event):
+        """Event filter for drag/drop visual feedback."""
+        if obj == self.central_widget:
+            if event.type() == QEvent.Resize:
+                self._update_drag_overlay_geometry()
+        return super().eventFilter(obj, event)
+
+    def _update_drag_overlay_geometry(self):
+        """Update drag overlay to cover central widget."""
+        if hasattr(self, 'drag_overlay'):
+            margin = 16
+            self.drag_overlay.setGeometry(
+                margin, margin,
+                self.central_widget.width() - 2 * margin,
+                self.central_widget.height() - 2 * margin
+            )
+
     def dragEnterEvent(self, event: QDragEnterEvent):
-        """Handle drag enter events."""
+        """Handle drag enter events with visual feedback."""
         if event.mimeData().hasUrls():
             urls = event.mimeData().urls()
             if urls and urls[0].isLocalFile():
                 path = urls[0].toLocalFile()
                 if os.path.isdir(path) or (os.path.isfile(path) and path.lower().endswith('.zip')):
                     event.acceptProposedAction()
-                    
+                    self.drag_overlay.show()
+                    self.drag_overlay.raise_()
+
+    def dragLeaveEvent(self, event):
+        """Handle drag leave event."""
+        self.drag_overlay.hide()
+
     def dropEvent(self, event: QDropEvent):
         """Handle drop events."""
+        self.drag_overlay.hide()
+
         if event.mimeData().hasUrls():
             urls = event.mimeData().urls()
             if urls:
@@ -350,13 +399,10 @@ class MainWindow(QMainWindow):
                 if os.path.isdir(path):
                     self._load_directory(path)
                 elif os.path.isfile(path) and path.lower().endswith('.zip'):
-                    # Handle single ZIP file
-                    self.status_bar.showMessage("Loading single ZIP file...")
-                    # TODO: Implement single ZIP file handling
-                    
+                    self.status_bar.showMessage("Single ZIP file handling not yet implemented.")
+
     def closeEvent(self, event):
         """Handle window close event."""
-        # Clean up services
         self.thumbnail_service.stop_service()
         self.zip_manager.close_all()
         event.accept()

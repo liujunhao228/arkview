@@ -1,17 +1,18 @@
 """
 Gallery view implementation for Arkview UI layer.
+Simplified, high-performance design focused on usability over visual effects.
 """
 
 import os
-import platform
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtWidgets import (
     QFrame, QScrollArea, QGridLayout, QLabel, QSizePolicy,
-    QVBoxLayout, QHBoxLayout, QWidget, QScrollBar, QAbstractItemView
+    QVBoxLayout, QHBoxLayout, QWidget
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread, Slot, QPropertyAnimation, QEasingCurve, QPoint, QPointF, Property
-from PySide6.QtGui import QPixmap, QPalette, QColor, QCursor, QPainter, QRadialGradient
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QPixmap, QCursor, QKeyEvent
 from PIL import Image
 import PIL.ImageQt
 
@@ -21,79 +22,18 @@ from ..core.models import LoadResult
 from ..core import _format_size
 
 
-class RippleEffect(QWidget):
-    """Ripple effect widget for click animations."""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        
-        self._ripple_radius = 0
-        self.ripple_center = QPointF(0, 0)
-        self.animation = QPropertyAnimation(self, b"rippleRadius")
-        self.animation.setDuration(600)
-        self.animation.setEasingCurve(QEasingCurve.OutCubic)
-        self.animation.finished.connect(self._on_animation_finished)
-        
-    def rippleRadius(self):
-        """Getter for ripple radius property."""
-        return self._ripple_radius
-        
-    def setRippleRadius(self, radius):
-        """Setter for ripple radius property."""
-        self._ripple_radius = radius
-        self.update()
-        
-    # 定义属性
-    rippleRadius = Property(float, rippleRadius, setRippleRadius)
-        
-    def start_ripple(self, pos: QPointF):
-        """Start ripple animation at given position."""
-        self.ripple_center = pos
-        self.animation.setStartValue(0)
-        self.animation.setEndValue(max(self.width(), self.height()) * 1.5)
-        self.animation.start()
-        
-    def _on_animation_finished(self):
-        """Handle animation finished."""
-        self.hide()
-        
-    def paintEvent(self, event):
-        """Paint ripple effect."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        # Draw ripple
-        gradient = QRadialGradient(self.ripple_center, self._ripple_radius)
-        gradient.setColorAt(0, QColor(26, 115, 232, 50))
-        gradient.setColorAt(1, QColor(26, 115, 232, 0))
-        
-        painter.setBrush(gradient)
-        painter.setPen(Qt.NoPen)
-        painter.drawRect(self.rect())
-        
-    def showEvent(self, event):
-        """Handle show event."""
-        super().showEvent(event)
-        self.raise_()
-        
-    def resizeEvent(self, event):
-        """Handle resize event."""
-        super().resizeEvent(event)
-        # Update animation end value when size changes
-        if self.animation.state() == QPropertyAnimation.Running:
-            self.animation.setEndValue(max(self.width(), self.height()) * 1.5)
-
-
 class GalleryCard(QFrame):
-    """Individual card for displaying a ZIP file in the gallery."""
-    
-    def __init__(self, zip_path: str, members: Optional[List[str]], 
+    """Lightweight card optimized for clarity and performance."""
+
+    CARD_MIN_WIDTH = 190
+    CARD_MAX_WIDTH = 280
+    THUMBNAIL_HEIGHT = 190
+
+    def __init__(self, zip_path: str, members: Optional[List[str]],
                  mod_time: float, file_size: int, image_count: int,
                  on_clicked: Callable, on_double_clicked: Callable):
         super().__init__()
-        
+
         self.zip_path = zip_path
         self.members = members
         self.mod_time = mod_time
@@ -101,174 +41,189 @@ class GalleryCard(QFrame):
         self.image_count = image_count
         self.on_clicked = on_clicked
         self.on_double_clicked = on_double_clicked
-        
+
         self.selected = False
         self.thumbnail_pixmap = None
-        
-        # 初始化透明度动画
-        self.opacity_effect = None
-        self.animation = None
-        
-        # 添加涟漪效果
-        self.ripple_effect = RippleEffect(self)
-        self.ripple_effect.hide()
-        
+
+        self.setObjectName("galleryCard")
+        self.setProperty("selected", "false")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setMinimumWidth(self.CARD_MIN_WIDTH)
+        self.setMaximumWidth(self.CARD_MAX_WIDTH)
+        self.setFixedHeight(300)
+
         self._setup_ui()
-        self._update_display()
-        
-        # 添加淡入动画
-        self._setup_animation()
-        
+        self._apply_styles()
+        self.show_loading_state()
+
     def _setup_ui(self):
-        """Setup the card UI."""
-        self.setFixedSize(220, 300)
-        self.setFrameStyle(QFrame.StyledPanel)
-        self.setLineWidth(1)
-        
-        # 添加圆角和阴影效果
-        self.setStyleSheet("""
-            GalleryCard {
-                background-color: white;
-                border-radius: 10px;
-                border: 1px solid #ddd;
-            }
-        """)
-        
         layout = QVBoxLayout(self)
-        layout.setSpacing(5)
-        layout.setContentsMargins(10, 10, 10, 10)
-        
-        # Thumbnail area
+        layout.setSpacing(8)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        self.thumbnail_container = QFrame()
+        self.thumbnail_container.setObjectName("thumbnailContainer")
+        self.thumbnail_container.setMinimumHeight(self.THUMBNAIL_HEIGHT)
+        self.thumbnail_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        thumbnail_layout = QVBoxLayout(self.thumbnail_container)
+        thumbnail_layout.setContentsMargins(6, 6, 6, 6)
+        thumbnail_layout.setSpacing(4)
+
         self.thumbnail_label = QLabel()
+        self.thumbnail_label.setObjectName("thumbnailMessage")
         self.thumbnail_label.setAlignment(Qt.AlignCenter)
-        self.thumbnail_label.setMinimumSize(200, 200)
-        self.thumbnail_label.setMaximumSize(200, 200)
-        self.thumbnail_label.setStyleSheet("""
-            background-color: #f8f9fa;
-            border: 1px solid #eaeaea;
-            border-radius: 8px;
-        """)
-        layout.addWidget(self.thumbnail_label)
-        
-        # Info area
-        info_layout = QVBoxLayout()
-        info_layout.setSpacing(2)
-        
+        self.thumbnail_label.setWordWrap(True)
+        thumbnail_layout.addWidget(self.thumbnail_label, alignment=Qt.AlignCenter)
+
+        self.thumbnail_pixmap_label = QLabel()
+        self.thumbnail_pixmap_label.setAlignment(Qt.AlignCenter)
+        self.thumbnail_pixmap_label.hide()
+        thumbnail_layout.addWidget(self.thumbnail_pixmap_label)
+
+        layout.addWidget(self.thumbnail_container)
+
         filename = os.path.basename(self.zip_path)
         self.name_label = QLabel(filename)
-        self.name_label.setStyleSheet("""
-            font-weight: bold; 
-            font-size: 13px;
-            color: #202124;
-        """)
+        self.name_label.setObjectName("cardTitle")
         self.name_label.setWordWrap(True)
-        info_layout.addWidget(self.name_label)
-        
-        details = f"{self.image_count} images | {_format_size(self.file_size)}"
-        self.details_label = QLabel(details)
-        self.details_label.setStyleSheet("""
-            color: #5f6368; 
-            font-size: 11px;
+        layout.addWidget(self.name_label)
+
+        badge_row = QHBoxLayout()
+        badge_row.setSpacing(6)
+        self.images_badge = self._create_badge(f"{self.image_count} images", accent=True)
+        self.size_badge = self._create_badge(_format_size(self.file_size), accent=False)
+        badge_row.addWidget(self.images_badge)
+        badge_row.addWidget(self.size_badge)
+        badge_row.addStretch()
+        layout.addLayout(badge_row)
+
+        self.meta_label = QLabel(self._format_metadata())
+        self.meta_label.setObjectName("metaLabel")
+        layout.addWidget(self.meta_label)
+        layout.addStretch()
+
+    def _apply_styles(self):
+        self.setStyleSheet("""
+            QFrame#galleryCard {
+                background-color: #ffffff;
+                border: 1px solid #dfe1e5;
+                border-radius: 12px;
+            }
+            QFrame#galleryCard[selected="true"] {
+                border: 2px solid #1a73e8;
+                background-color: #f5f8ff;
+            }
+            QFrame#galleryCard:hover {
+                border-color: #4c8bf5;
+            }
+            QFrame#thumbnailContainer {
+                background-color: #f5f6f8;
+                border-radius: 10px;
+            }
+            QLabel#cardTitle {
+                font-size: 14px;
+                font-weight: 600;
+                color: #1b1f3b;
+            }
+            QLabel#metaLabel {
+                color: #5f6368;
+                font-size: 12px;
+            }
+            QLabel.metaBadge {
+                border-radius: 10px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QLabel.metaBadge[muted="false"] {
+                background-color: #e8f0fe;
+                color: #174ea6;
+            }
+            QLabel.metaBadge[muted="true"] {
+                background-color: #f1f3f4;
+                color: #3c4043;
+            }
+            QLabel#thumbnailMessage {
+                color: #3c4043;
+                font-size: 13px;
+            }
+            QLabel#thumbnailMessage[state="loading"] {
+                color: #1a73e8;
+            }
+            QLabel#thumbnailMessage[state="error"] {
+                color: #c5221f;
+            }
+            QLabel#thumbnailMessage[state="empty"] {
+                color: #5f6368;
+            }
         """)
-        info_layout.addWidget(self.details_label)
-        
-        layout.addLayout(info_layout)
-        
-        # Click handling
-        self.mousePressEvent = self._handle_click
-        self.mouseDoubleClickEvent = self._handle_double_click
-        
-    def _setup_animation(self):
-        """Setup fade-in animation."""
-        # 创建透明度效果
-        from PySide6.QtWidgets import QGraphicsOpacityEffect
-        self.opacity_effect = QGraphicsOpacityEffect()
-        self.setGraphicsEffect(self.opacity_effect)
-        
-        # 创建动画
-        self.animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.animation.setDuration(300)
-        self.animation.setStartValue(0)
-        self.animation.setEndValue(1)
-        self.animation.setEasingCurve(QEasingCurve.OutCubic)
-        self.animation.start()
-        
-    def _update_display(self):
-        """Update card display based on current state."""
-        if self.selected:
-            self.setStyleSheet("""
-                GalleryCard {
-                    background-color: #e8f0fe;
-                    border-radius: 10px;
-                    border: 2px solid #1a73e8;
-                }
-            """)
-        else:
-            self.setStyleSheet("""
-                GalleryCard {
-                    background-color: white;
-                    border-radius: 10px;
-                    border: 1px solid #dadce0;
-                }
-                GalleryCard:hover {
-                    border: 1px solid #1a73e8;
-                    background-color: #f8f9fa;
-                }
-            """)
-            
-    def enterEvent(self, event):
-        """Handle mouse enter event."""
-        # 添加鼠标悬停效果
-        self.setCursor(QCursor(Qt.PointingHandCursor))
-        super().enterEvent(event)
-        
-    def leaveEvent(self, event):
-        """Handle mouse leave event."""
-        # 恢复默认光标
-        self.setCursor(QCursor(Qt.ArrowCursor))
-        super().leaveEvent(event)
-        
-    def _handle_click(self, event):
-        """Handle mouse click event."""
-        # 显示涟漪效果
-        if event.position():
-            self.ripple_effect.setGeometry(self.rect())
-            self.ripple_effect.show()
-            self.ripple_effect.start_ripple(event.position())
-            
-        self.on_clicked(self)
-        
-    def _handle_double_click(self, event):
-        """Handle mouse double-click event."""
-        self.on_double_clicked(self)
-        
+
+    def _refresh_style(self, target: Optional[QWidget] = None):
+        widget = target or self
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def _create_badge(self, text: str, accent: bool) -> QLabel:
+        badge = QLabel(text)
+        badge.setObjectName("metaBadge")
+        badge.setProperty("muted", "false" if accent else "true")
+        badge.setAlignment(Qt.AlignCenter)
+        return badge
+
+    def _format_metadata(self) -> str:
+        try:
+            dt = datetime.fromtimestamp(self.mod_time)
+            return f"Updated {dt.strftime('%Y-%m-%d %H:%M')}"
+        except Exception:
+            return "Updated recently"
+
+    def _set_message(self, icon: str, text: str, state: str):
+        self.thumbnail_label.setText(f"{icon}\n{text}")
+        self.thumbnail_label.setProperty("state", state)
+        self.thumbnail_label.show()
+        self.thumbnail_pixmap_label.hide()
+        self.thumbnail_pixmap_label.clear()
+        self.thumbnail_pixmap = None
+        self._refresh_style(self.thumbnail_label)
+
+    def show_loading_state(self):
+        self._set_message("⏳", "Loading preview…", "loading")
+
+    def show_error_state(self, text: str = "Preview failed"):
+        self._set_message("⚠️", text, "error")
+
+    def show_empty_state(self):
+        self._set_message("📭", "No images", "empty")
+
     def set_selected(self, selected: bool):
-        """Set card selection state."""
         self.selected = selected
-        self._update_display()
-        
+        self.setProperty("selected", "true" if selected else "false")
+        self._refresh_style()
+
     def set_thumbnail(self, pixmap: QPixmap):
-        """Set thumbnail pixmap."""
         self.thumbnail_pixmap = pixmap
-        self.thumbnail_label.setText("")  # 清除加载文本
-        self.thumbnail_label.setStyleSheet("""
-            background-color: #f8f9fa;
-            border: 1px solid #eaeaea;
-            border-radius: 8px;
-        """)
-        self.thumbnail_label.setPixmap(pixmap.scaled(
-            200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            
-    def resizeEvent(self, event):
-        """Handle resize event."""
-        super().resizeEvent(event)
-        # 更新涟漪效果大小
-        self.ripple_effect.setGeometry(self.rect())
+        scaled = pixmap.scaled(204, self.THUMBNAIL_HEIGHT - 6,
+                               Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.thumbnail_pixmap_label.setPixmap(scaled)
+        self.thumbnail_pixmap_label.show()
+        self.thumbnail_label.hide()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.on_clicked(self)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.on_double_clicked(self)
+        super().mouseDoubleClickEvent(event)
 
 
 class GalleryView(QFrame):
-    """Gallery view component with mobile-like UX and modern design."""
-    
+    """Simplified, high-performance gallery view with comprehensive keyboard support."""
+
     def __init__(
         self,
         parent: QWidget,
@@ -282,7 +237,7 @@ class GalleryView(QFrame):
         open_viewer_func: Callable[[str, List[str], int], None]
     ):
         super().__init__(parent)
-        
+
         self.zip_files = zip_files
         self.app_settings = app_settings
         self.cache = cache
@@ -291,16 +246,20 @@ class GalleryView(QFrame):
         self.ensure_members_loaded = ensure_members_loaded_func
         self.on_selection_changed = on_selection_changed
         self.open_viewer_func = open_viewer_func
-        
+
         # UI state
         self.cards: List[GalleryCard] = []
         self.selected_card: Optional[GalleryCard] = None
         self.card_mapping: Dict[str, GalleryCard] = {}
-        
+        self.current_columns = 4
+
         # Scrolling state
         self.scroll_position = 0
         self.visible_cards = set()
-        
+
+        # Enable keyboard focus
+        self.setFocusPolicy(Qt.StrongFocus)
+
         # Setup UI
         self._setup_ui()
         self.populate()
@@ -308,86 +267,84 @@ class GalleryView(QFrame):
     def _setup_ui(self):
         """Setup the gallery view UI."""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
-        layout.setSpacing(20)
-        
-        # Header
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
         header_layout = QHBoxLayout()
-        title_label = QLabel("Comic Archives")
-        title_label.setStyleSheet("""
-            font-size: 28px; 
+        self.title_label = QLabel("Archive library")
+        self.title_label.setStyleSheet("""
+            font-size: 24px;
             font-weight: 600;
             color: #202124;
         """)
-        header_layout.addWidget(title_label)
+        header_layout.addWidget(self.title_label)
         header_layout.addStretch()
-        
-        count_label = QLabel(f"{len(self.zip_files)} archives")
-        count_label.setStyleSheet("""
-            font-size: 14px; 
-            color: #5f6368;
-            background-color: #f1f3f4;
-            padding: 5px 12px;
-            border-radius: 12px;
+
+        self.count_label = QLabel(f"{len(self.zip_files)} archives")
+        self.count_label.setStyleSheet("""
+            font-size: 13px;
+            color: #3c4043;
+            background-color: #eef3ff;
+            padding: 4px 10px;
+            border-radius: 10px;
         """)
-        header_layout.addWidget(count_label)
-        
+        header_layout.addWidget(self.count_label)
         layout.addLayout(header_layout)
-        
-        # Scroll area for cards
+
+        hint_label = QLabel("Arrow keys navigate • Enter opens • Esc clears selection")
+        hint_label.setStyleSheet("""
+            color: #5f6368;
+            font-size: 12px;
+        """)
+        layout.addWidget(hint_label)
+
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
-        
-        # 添加滚动条样式
+        self.scroll_area.setFocusPolicy(Qt.NoFocus)
         self.scroll_area.setStyleSheet("""
-            QScrollArea {
-                border: none;
-            }
+            QScrollArea { border: none; }
             QScrollBar:vertical {
                 border: none;
-                background: #f1f3f4;
+                background: #f4f5f7;
                 width: 10px;
                 border-radius: 5px;
-                margin: 0px 0px 0px 0px;
+                margin: 0;
             }
             QScrollBar::handle:vertical {
-                background: #dadce0;
+                background: #c7ccd1;
                 border-radius: 5px;
             }
             QScrollBar::handle:vertical:hover {
-                background: #bcc0c4;
+                background: #aeb4bb;
             }
         """)
-        
-        # Content widget
+
         self.content_widget = QWidget()
-        self.content_widget.setStyleSheet("background-color: transparent;")
         self.grid_layout = QGridLayout(self.content_widget)
         self.grid_layout.setAlignment(Qt.AlignTop)
-        self.grid_layout.setSpacing(25)
+        self.grid_layout.setHorizontalSpacing(20)
+        self.grid_layout.setVerticalSpacing(25)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.scroll_area.setWidget(self.content_widget)
         layout.addWidget(self.scroll_area)
-        
-        # Connect scroll events
+
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
         
     def populate(self):
         """Populate the gallery with ZIP file cards."""
-        # Clear existing cards
         for i in reversed(range(self.grid_layout.count())):
             widget = self.grid_layout.itemAt(i).widget()
             if widget:
                 widget.setParent(None)
-                
+
         self.cards.clear()
         self.card_mapping.clear()
-        
-        # Create cards for each ZIP file
+
+        columns = self._calculate_columns()
         row, col = 0, 0
         for zip_path, (members, mod_time, file_size, image_count) in self.zip_files.items():
             card = GalleryCard(
@@ -399,57 +356,67 @@ class GalleryView(QFrame):
                 on_clicked=self._on_card_clicked,
                 on_double_clicked=self._on_card_double_clicked
             )
-            
+
             self.grid_layout.addWidget(card, row, col)
             self.cards.append(card)
             self.card_mapping[zip_path] = card
-            
+
             col += 1
-            # 根据窗口宽度动态调整列数
-            if col >= self._calculate_columns():
+            if col >= columns:
                 col = 0
                 row += 1
-                
-        # Trigger thumbnail loading
+
+        self.current_columns = columns
+        self.count_label.setText(f"{len(self.zip_files)} archives")
         QTimer.singleShot(100, self._load_visible_thumbnails)
+        self.setFocus(Qt.OtherFocusReason)
         
     def _calculate_columns(self) -> int:
-        """Calculate number of columns based on available width."""
+        """Calculate number of columns with improved responsive behavior."""
         if not self.scroll_area:
-            return 4  # 默认4列
-            
-        available_width = self.scroll_area.width() - 20  # 减去滚动条和边距
-        # 每个卡片宽220px，间距25px
-        column_width = 220 + 25
-        columns = max(1, available_width // column_width)
-        return min(columns, 6)  # 最多6列
-        
+            return 4
+
+        viewport_width = self.scroll_area.viewport().width()
+        min_card_width = GalleryCard.CARD_MIN_WIDTH
+        max_card_width = GalleryCard.CARD_MAX_WIDTH
+        spacing = 20
+
+        # Consider available space with margins
+        available_width = max(320, viewport_width - 40)
+
+        # Calculate reasonable column count
+        min_columns = max(1, available_width // (max_card_width + spacing))
+        max_columns = min(6, available_width // (min_card_width + spacing))
+        optimal = max(1, available_width // (230 + spacing))
+
+        columns = max(min_columns, min(max_columns, optimal))
+        return columns
+
     def resizeEvent(self, event):
         """Handle resize events to adjust grid layout."""
         super().resizeEvent(event)
-        # 重新布局卡片
-        self._rearrange_cards()
-        
+        new_columns = self._calculate_columns()
+        if new_columns != self.current_columns:
+            self._rearrange_cards()
+
     def _rearrange_cards(self):
         """Rearrange cards based on current width."""
-        # 清除现有布局
         for i in reversed(range(self.grid_layout.count())):
             widget = self.grid_layout.itemAt(i).widget()
             if widget:
                 self.grid_layout.removeWidget(widget)
-                
-        # 重新添加卡片
-        row, col = 0, 0
+
         columns = self._calculate_columns()
-        
+        row, col = 0, 0
+
         for card in self.cards:
             self.grid_layout.addWidget(card, row, col)
             col += 1
             if col >= columns:
                 col = 0
                 row += 1
-                
-        # 触发缩略图加载
+
+        self.current_columns = columns
         QTimer.singleShot(100, self._load_visible_thumbnails)
         
     def _on_card_clicked(self, card: GalleryCard):
@@ -495,53 +462,40 @@ class GalleryView(QFrame):
         scroll_value = scroll_area.verticalScrollBar().value()
         viewport_height = scroll_area.viewport().height()
         
-        # Calculate which cards are visible
-        card_height = 325  # Card height + spacing
-        start_index = max(0, scroll_value // card_height - 2)  # Add larger buffer
-        visible_count = (viewport_height // card_height) + 4  # Add larger buffer
+        spacing = (self.grid_layout.verticalSpacing() or 20)
+        card_height = (self.cards[0].height() if self.cards else 300) + spacing
+        card_height = max(card_height, 200)
+        start_index = max(0, scroll_value // card_height - 1)
+        visible_count = (viewport_height // card_height) + 3
         end_index = min(len(self.cards), start_index + visible_count)
-        
-        # Load thumbnails for visible cards
+
         for i in range(start_index, end_index):
             if i < len(self.cards):
                 card = self.cards[i]
                 self._load_card_thumbnail(card)
         
     def _load_card_thumbnail(self, card: GalleryCard):
-        """Load thumbnail for a specific card."""
-        # Skip if already loaded
+        """Load thumbnail for a specific card with improved error handling."""
         if card.thumbnail_pixmap is not None:
             return
-            
-        # 显示加载指示器
-        card.thumbnail_label.setText("Loading...")
-        card.thumbnail_label.setStyleSheet("""
-            background-color: #f8f9fa;
-            border: 1px solid #eaeaea;
-            border-radius: 8px;
-            color: #5f6368;
-            font-size: 12px;
-        """)
-            
-        # Make sure we have members
+
+        card.show_loading_state()
+
         if card.members is None:
             members = self.ensure_members_loaded(card.zip_path)
             if members is not None:
                 card.members = members
             else:
-                card.thumbnail_label.setText("Failed to load")
+                card.show_error_state("Failed to open")
                 return
-                
-        # Make sure we have at least one image
+
         if not card.members:
-            card.thumbnail_label.setText("No images")
+            card.show_empty_state()
             return
-            
-        # Get the first image as thumbnail
+
         first_image = card.members[0]
         cache_key = (card.zip_path, first_image)
-        
-        # Check cache first
+
         cached_image = self.cache.get(cache_key)
         if cached_image is not None:
             try:
@@ -551,48 +505,104 @@ class GalleryView(QFrame):
                 return
             except Exception as e:
                 print(f"Error converting cached image: {e}")
-        
-        # Load the image
+
         try:
             zf = self.zip_manager.get_zipfile(card.zip_path)
             if zf is None:
-                card.thumbnail_label.setText("ZIP error")
+                card.show_error_state("ZIP error")
                 return
-                
+
             image_data = zf.read(first_image)
             from io import BytesIO
             with BytesIO(image_data) as image_stream:
                 img = Image.open(image_stream)
                 img.load()
-                
-            # Resize for thumbnail
-            img.thumbnail((200, 200), Image.Resampling.LANCZOS)
-            
-            # Cache it
+
+            img.thumbnail((210, 210), Image.Resampling.LANCZOS)
             self.cache.put(cache_key, img)
-            
-            # Convert to QPixmap and set
+
             qimage = PIL.ImageQt.ImageQt(img)
             pixmap = QPixmap.fromImage(qimage)
             card.set_thumbnail(pixmap)
         except Exception as e:
             print(f"Error loading thumbnail for {card.zip_path}: {e}")
-            # Show error in thumbnail area
-            card.thumbnail_label.setText("Load failed")
-            card.thumbnail_label.setStyleSheet("""
-                background-color: #fce8e6;
-                border: 1px solid #fad2cf;
-                border-radius: 8px;
-                color: #c5221f;
-                font-size: 12px;
-            """)
-        
+            card.show_error_state()
+
+    def keyPressEvent(self, event: QKeyEvent):
+        """Handle keyboard shortcuts for navigation."""
+        key = event.key()
+
+        if key == Qt.Key_Escape:
+            self._clear_selection()
+        elif key == Qt.Key_Return or key == Qt.Key_Enter:
+            self._open_selected()
+        elif key in (Qt.Key_Left, Qt.Key_A):
+            self._navigate_card(-1)
+        elif key in (Qt.Key_Right, Qt.Key_D):
+            self._navigate_card(1)
+        elif key in (Qt.Key_Up, Qt.Key_W):
+            self._navigate_card(-self.current_columns)
+        elif key in (Qt.Key_Down, Qt.Key_S):
+            self._navigate_card(self.current_columns)
+        elif key == Qt.Key_Home:
+            self._navigate_to_first()
+        elif key == Qt.Key_End:
+            self._navigate_to_last()
+        else:
+            super().keyPressEvent(event)
+
+    def _clear_selection(self):
+        """Clear current selection."""
+        if self.selected_card:
+            self.selected_card.set_selected(False)
+            self.selected_card = None
+            self.on_selection_changed("", [], 0)
+
+    def _open_selected(self):
+        """Open viewer for selected card."""
+        if self.selected_card:
+            self._on_card_double_clicked(self.selected_card)
+
+    def _navigate_card(self, delta: int):
+        """Navigate to adjacent card."""
+        if not self.cards:
+            return
+
+        if self.selected_card is None:
+            target_card = self.cards[0]
+        else:
+            try:
+                current_index = self.cards.index(self.selected_card)
+                target_index = max(0, min(len(self.cards) - 1, current_index + delta))
+                target_card = self.cards[target_index]
+            except ValueError:
+                target_card = self.cards[0]
+
+        self._on_card_clicked(target_card)
+        self._ensure_card_visible(target_card)
+
+    def _navigate_to_first(self):
+        """Navigate to first card."""
+        if self.cards:
+            self._on_card_clicked(self.cards[0])
+            self._ensure_card_visible(self.cards[0])
+
+    def _navigate_to_last(self):
+        """Navigate to last card."""
+        if self.cards:
+            self._on_card_clicked(self.cards[-1])
+            self._ensure_card_visible(self.cards[-1])
+
+    def _ensure_card_visible(self, card: GalleryCard):
+        """Ensure the given card is visible in the scroll area."""
+        self.scroll_area.ensureWidgetVisible(card, 50, 50)
+
     def update_performance_mode(self, enabled: bool):
         """Update view for performance mode change."""
         self.app_settings["performance_mode"] = enabled
-        # Reload thumbnails with new settings
         QTimer.singleShot(100, self._load_visible_thumbnails)
-        
+
     def refresh_view(self):
         """Refresh the gallery view."""
         self.populate()
+
