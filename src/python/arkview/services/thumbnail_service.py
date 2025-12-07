@@ -60,6 +60,8 @@ class ThumbnailService(QObject):
     
     # Signal to request thumbnail loading
     load_thumbnail_request = Signal(str, str, tuple, int, tuple, bool)
+    # Signal emitted when thumbnail is loaded
+    thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
     
     def __init__(self, cache: 'LRUCache', zip_manager: 'ZipFileManager', config: dict):
         super().__init__()
@@ -92,8 +94,8 @@ class ThumbnailService(QObject):
 
     def _on_thumbnail_loaded(self, result: LoadResult, cache_key: tuple):
         """Handle thumbnail loaded event - to be connected in UI layer."""
-        # This signal needs to be connected in the UI layer
-        pass
+        # Emit the thumbnailLoaded signal for the UI layer to handle
+        self.thumbnailLoaded.emit(result, cache_key)
 
     def stop_service(self):
         """Stop the thumbnail service and cleanup resources."""

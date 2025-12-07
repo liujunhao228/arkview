@@ -8,6 +8,18 @@ from dataclasses import dataclass
 from PIL import Image
 
 
+def _format_size(size_bytes: int) -> str:
+    """Formats byte size into a human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024**2:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024**3:
+        return f"{size_bytes / 1024**2:.1f} MB"
+    else:
+        return f"{size_bytes / 1024**3:.1f} GB"
+
+
 @dataclass
 class ZipFileInfo:
     """Information about a ZIP file."""
@@ -23,24 +35,16 @@ class ZipFileInfo:
         if self.file_size is None:
             return "Unknown"
             
-        size_bytes = self.file_size
-        if size_bytes < 1024:
-            return f"{size_bytes} B"
-        elif size_bytes < 1024**2:
-            return f"{size_bytes / 1024:.1f} KB"
-        elif size_bytes < 1024**3:
-            return f"{size_bytes / 1024**2:.1f} MB"
-        else:
-            return f"{size_bytes / 1024**3:.1f} GB"
+        return _format_size(self.file_size)
 
 
 @dataclass
 class LoadResult:
     """Result of an asynchronous image load operation."""
     success: bool
-    data: Optional[Image.Image]
-    error_message: str
-    cache_key: Optional[tuple]
+    data: Optional[Image.Image] = None
+    error_message: str = ""
+    cache_key: Optional[tuple] = None
 
 
 @dataclass
