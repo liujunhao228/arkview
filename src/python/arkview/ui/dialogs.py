@@ -23,6 +23,7 @@ class SettingsDialog(QDialog):
         
         self._setup_ui()
         self._populate_settings()
+        self._apply_dark_theme()
         
     def _setup_ui(self):
         """Setup the settings dialog UI."""
@@ -94,6 +95,82 @@ class SettingsDialog(QDialog):
         window_size = self.config.get("WINDOW_SIZE", (1050, 750))
         self.window_size_edit.setText(f"{window_size[0]}x{window_size[1]}")
         
+    def _apply_dark_theme(self):
+        """Apply dark theme to the settings dialog."""
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2b2b2b;
+                color: #e0e0e0;
+            }
+            QGroupBox {
+                background-color: #3c3f41;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                margin-top: 8px;
+                color: #bbbbbb;
+                padding-top: 16px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 8px;
+                padding: 0 4px;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QCheckBox {
+                color: #bbbbbb;
+            }
+            QCheckBox::indicator:unchecked {
+                border: 1px solid #555555;
+                background-color: #45494a;
+            }
+            QCheckBox::indicator:checked {
+                border: 1px solid #555555;
+                background-color: #4b6eaf;
+            }
+            QSpinBox, QComboBox, QLineEdit {
+                background-color: #45494a;
+                color: #e0e0e0;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #3c3f41;
+                border: none;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #4b6eaf;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #45494a;
+                border: 1px solid #555555;
+                selection-background-color: #4b6eaf;
+            }
+            QPushButton {
+                background-color: #3c3f41;
+                color: #bbbbbb;
+                border: 1px solid #555555;
+                border-radius: 4px;
+                padding: 6px 12px;
+                min-width: 60px;
+            }
+            QPushButton:hover {
+                background-color: #4b6eaf;
+                border: 1px solid #555555;
+            }
+            QPushButton:pressed {
+                background-color: #3a588c;
+            }
+            QPushButton:disabled {
+                background-color: #4a4d4f;
+                color: #888888;
+                border: 1px solid #666666;
+            }
+        """)
+        
     def get_settings(self) -> Dict[str, Any]:
         """Get settings from the dialog."""
         settings = {}
@@ -138,6 +215,7 @@ class AboutDialog(QDialog):
         self.resize(300, 200)
         
         self._setup_ui()
+        self._apply_dark_theme()
         
     def _setup_ui(self):
         """Setup the about dialog UI."""

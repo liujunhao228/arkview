@@ -63,14 +63,14 @@ class ThumbnailService(QObject):
     # Signal emitted when thumbnail is loaded
     thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
     
-    def __init__(self, cache: 'LRUCache', zip_manager: 'ZipFileManager', config: dict):
+    def __init__(self, cache_service, zip_manager: 'ZipFileManager', config: dict):
         super().__init__()
-        self.cache = cache
+        self.cache_service = cache_service
         self.zip_manager = zip_manager
         self.config = config
         
         # Create image service
-        self.image_service = ImageService(cache, zip_manager)
+        self.image_service = ImageService(cache_service, zip_manager)
         
         # Create worker thread and worker
         self.worker_thread = QThread()

@@ -14,7 +14,9 @@ class LRUCache:
     def __init__(self, capacity: int):
         self.cache: OrderedDict = CollectionsOrderedDict()
         self.capacity = capacity
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self.access_count = 0
+        self.hit_count = 0
 
     def get(self, key: tuple) -> Optional[Image.Image]:
         """Retrieve an item from the cache."""
@@ -66,6 +68,8 @@ class LRUCache:
                 except Exception:
                     pass
             self.cache.clear()
+            self.access_count = 0
+            self.hit_count = 0
 
     def resize(self, new_capacity: int):
         """Resize the cache capacity."""
@@ -85,3 +89,10 @@ class LRUCache:
         """Check if a key exists in the cache."""
         with self._lock:
             return key in self.cache
+                
+    @property
+    def hit_rate(self) -> float:
+        """获取缓存命中率"""
+        if self.access_count == 0:
+            return 0.0
+        return self.hit_count / self.access_count

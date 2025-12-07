@@ -16,6 +16,8 @@ from PySide6.QtGui import QPixmap, QAction, QKeySequence, QKeyEvent
 from ..core.file_manager import ZipFileManager
 from ..core.models import LoadResult
 from ..services.image_service import ImageService
+from PIL import Image
+import PIL.ImageQt
 
 
 class ImageViewerWindow(QMainWindow):
@@ -50,6 +52,7 @@ class ImageViewerWindow(QMainWindow):
         
         self._setup_ui()
         self._load_current_image()
+        self._apply_dark_theme()
         
     def _setup_ui(self):
         """Setup the viewer UI."""
@@ -79,6 +82,41 @@ class ImageViewerWindow(QMainWindow):
         
         # Keyboard shortcuts
         self._setup_shortcuts()
+        
+    def _apply_dark_theme(self):
+        """Apply dark theme to the viewer window."""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+            }
+            QToolBar {
+                background-color: #3c3f41;
+                border: none;
+            }
+            QToolBar QToolButton {
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 4px;
+                color: #bbbbbb;
+            }
+            QToolBar QToolButton:hover {
+                background-color: #4b6eaf;
+                border: 1px solid #555555;
+            }
+            QToolBar QToolButton:pressed {
+                background-color: #3a588c;
+            }
+            QStatusBar {
+                background-color: #3c3f41;
+                color: #bbbbbb;
+                border-top: 1px solid #555555;
+            }
+            QLabel {
+                background-color: #2b2b2b;
+                color: #e0e0e0;
+            }
+        """)
         
     def _setup_toolbar(self):
         """Setup the viewer toolbar."""
@@ -115,102 +153,116 @@ class ImageViewerWindow(QMainWindow):
         # Reset zoom
         reset_zoom_action = QAction("Reset Zoom", self)
         reset_zoom_action.triggered.connect(self.reset_zoom)
+        reset_zoom_action.setShortcut(QKeySequence("Ctrl+0"))
         toolbar.addAction(reset_zoom_action)
+        
+        toolbar.addSeparator()
+        
+        # Performance mode toggle
+        self.performance_action = QAction("Performance Mode", self)
+        self.performance_action.setCheckable(True)
+        self.performance_action.setChecked(self.performance_mode)
+        self.performance_action.toggled.connect(self.toggle_performance_mode)
+        toolbar.addAction(self.performance_action)
         
     def _setup_shortcuts(self):
         """Setup keyboard shortcuts."""
-        # Enable key events
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.esc_shortcut = QAction(self)
+        self.esc_shortcut.setShortcut(QKeySequence("Esc"))
+        self.esc_shortcut.triggered.connect(self.close)
+        self.addAction(self.esc_shortcut)
         
     def _load_current_image(self):
         """Load the current image."""
         if not self.image_members or self.current_index < 0 or self.current_index >= len(self.image_members):
+            self.status_bar.showMessage("No image to display")
             return
             
         member_name = self.image_members[self.current_index]
         self.status_bar.showMessage(f"Loading {member_name}...")
         
-        # Determine max load size based on performance mode
-        max_load_size = self.config[
-            "PERFORMANCE_MAX_VIEWER_LOAD_SIZE" if self.performance_mode 
-            else "MAX_VIEWER_LOAD_SIZE"
-        ]
-        
-        # Create cache key
-        cache_key = (self.zip_path, member_name, "viewer")
-        
-        # Load image using image service
-        result = self.image_service.load_image_data_async(
-            zip_path=self.zip_path,
-            member_name=member_name,
-            max_load_size=max_load_size,
-            target_size=None,  # Load full size for viewer
-            cache_key=cache_key,
-            performance_mode=self.performance_mode
-        )
-        
-        if result and result.success and result.data:
-            self._display_image(result.data)
-            self.status_bar.showMessage(
-                f"{member_name} | {self.current_index + 1}/{len(self.image_members)}")
-        else:
-            error_msg = result.error_message if result else "Unknown error"
-            self.status_bar.showMessage(f"Failed to load {member_name}: {error_msg}")
+        try:
+            # 修复：将target_size设为None，这样就不会加载缩略图而是完整图像
+            result = self.image_service.load_image_data_async(
+                self.zip_path, member_name, 32 * 1024 * 1024, None, 
+                (self.zip_path, member_name), self.performance_mode
+            )
             
-    def _display_image(self, image):
-        """Display an image in the viewer."""
-        from PIL import ImageQt
-        
-        # Convert PIL Image to QPixmap
-        qt_image = ImageQt.ImageQt(image)
-        self.pixmap = QPixmap.fromImage(qt_image)
-        
-        # Reset scale
-        self.scale_factor = 1.0
-        self._update_display()
-        
-    def _update_display(self):
-        """Update image display with current scale factor."""
+            if result.success and result.data:
+                self.display_image(result.data)
+                self.status_bar.showMessage(
+                    f"{member_name} ({result.data.width}×{result.data.height}) "
+                    f"[{ 'Performance' if self.performance_mode else 'Quality' } mode]"
+                )
+            else:
+                self.status_bar.showMessage(f"Failed to load {member_name}")
+        except Exception as e:
+            self.status_bar.showMessage(f"Error loading {member_name}: {str(e)}")
+            
+    def display_image(self, image):
+        """Display a PIL Image."""
+        try:
+            # Convert PIL Image to QPixmap
+            qt_image = PIL.ImageQt.ImageQt(image)
+            self.pixmap = QPixmap.fromImage(qt_image)
+            
+            # Reset scale factor
+            self.scale_factor = 1.0
+            
+            # Display the image
+            self._update_image_display()
+        except Exception as e:
+            self.status_bar.showMessage(f"Error displaying image: {str(e)}")
+            
+    def _update_image_display(self):
+        """Update the image display with current scale."""
         if self.pixmap:
             scaled_pixmap = self.pixmap.scaled(
                 self.pixmap.width() * self.scale_factor,
                 self.pixmap.height() * self.scale_factor,
                 Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
+                Qt.SmoothTransformation if not self.performance_mode else Qt.FastTransformation
             )
             self.image_label.setPixmap(scaled_pixmap)
             self.image_label.resize(scaled_pixmap.size())
             
     def next_image(self):
         """Go to the next image."""
-        if self.current_index < len(self.image_members) - 1:
+        if self.image_members and self.current_index < len(self.image_members) - 1:
             self.current_index += 1
             self._load_current_image()
             
     def previous_image(self):
         """Go to the previous image."""
-        if self.current_index > 0:
+        if self.image_members and self.current_index > 0:
             self.current_index -= 1
             self._load_current_image()
             
     def zoom_in(self):
-        """Zoom in."""
-        if self.scale_factor < self.max_scale:
-            self.scale_factor *= self.zoom_factor
-            self.scale_factor = min(self.scale_factor, self.max_scale)
-            self._update_display()
+        """Zoom in on the image."""
+        if self.pixmap:
+            self.scale_factor = min(self.scale_factor * self.zoom_factor, self.max_scale)
+            self._update_image_display()
+            self.status_bar.showMessage(f"Zoom: {self.scale_factor:.1f}x")
             
     def zoom_out(self):
-        """Zoom out."""
-        if self.scale_factor > self.min_scale:
-            self.scale_factor /= self.zoom_factor
-            self.scale_factor = max(self.scale_factor, self.min_scale)
-            self._update_display()
+        """Zoom out on the image."""
+        if self.pixmap:
+            self.scale_factor = max(self.scale_factor / self.zoom_factor, self.min_scale)
+            self._update_image_display()
+            self.status_bar.showMessage(f"Zoom: {self.scale_factor:.1f}x")
             
     def reset_zoom(self):
-        """Reset zoom to fit."""
-        self.scale_factor = 1.0
-        self._update_display()
+        """Reset image zoom."""
+        if self.pixmap:
+            self.scale_factor = 1.0
+            self._update_image_display()
+            self.status_bar.showMessage("Zoom reset")
+            
+    def toggle_performance_mode(self, enabled):
+        """Toggle performance mode."""
+        self.performance_mode = enabled
+        self._load_current_image()
         
     def keyPressEvent(self, event: QKeyEvent):
         """Handle key press events."""
@@ -218,11 +270,11 @@ class ImageViewerWindow(QMainWindow):
             self.next_image()
         elif event.key() == Qt.Key_Left:
             self.previous_image()
-        elif event.key() == Qt.Key_Plus or event.key() == Qt.Key_Equal:
-            self.zoom_in()
-        elif event.key() == Qt.Key_Minus:
-            self.zoom_out()
-        elif event.key() == Qt.Key_0:
-            self.reset_zoom()
+        elif event.key() == Qt.Key_Space:
+            self.next_image()
+        elif event.key() == Qt.Key_PageDown:
+            self.next_image()
+        elif event.key() == Qt.Key_PageUp:
+            self.previous_image()
         else:
             super().keyPressEvent(event)

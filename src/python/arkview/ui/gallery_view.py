@@ -16,7 +16,8 @@ from PySide6.QtGui import QPixmap, QCursor, QKeyEvent
 from PIL import Image
 import PIL.ImageQt
 
-from ..core.cache import LRUCache
+# 修改导入，使用增强的缓存服务
+from ..services.cache_service import EnhancedCacheService
 from ..core.file_manager import ZipFileManager
 from ..core.models import LoadResult
 from ..core import _format_size
@@ -106,28 +107,28 @@ class GalleryCard(QFrame):
     def _apply_styles(self):
         self.setStyleSheet("""
             QFrame#galleryCard {
-                background-color: #ffffff;
-                border: 1px solid #dfe1e5;
+                background-color: #3c3f41;
+                border: 1px solid #555555;
                 border-radius: 12px;
             }
             QFrame#galleryCard[selected="true"] {
-                border: 2px solid #1a73e8;
-                background-color: #f5f8ff;
+                border: 2px solid #4b6eaf;
+                background-color: #45494a;
             }
             QFrame#galleryCard:hover {
-                border-color: #4c8bf5;
+                border-color: #4b6eaf;
             }
             QFrame#thumbnailContainer {
-                background-color: #f5f6f8;
+                background-color: #2b2b2b;
                 border-radius: 10px;
             }
             QLabel#cardTitle {
                 font-size: 14px;
                 font-weight: 600;
-                color: #1b1f3b;
+                color: #e0e0e0;
             }
             QLabel#metaLabel {
-                color: #5f6368;
+                color: #bbbbbb;
                 font-size: 12px;
             }
             QLabel.metaBadge {
@@ -137,25 +138,25 @@ class GalleryCard(QFrame):
                 font-weight: 600;
             }
             QLabel.metaBadge[muted="false"] {
-                background-color: #e8f0fe;
-                color: #174ea6;
+                background-color: #4b6eaf;
+                color: #ffffff;
             }
             QLabel.metaBadge[muted="true"] {
-                background-color: #f1f3f4;
-                color: #3c4043;
+                background-color: #5a5d5e;
+                color: #e0e0e0;
             }
             QLabel#thumbnailMessage {
-                color: #3c4043;
+                color: #e0e0e0;
                 font-size: 13px;
             }
             QLabel#thumbnailMessage[state="loading"] {
-                color: #1a73e8;
+                color: #4b6eaf;
             }
             QLabel#thumbnailMessage[state="error"] {
-                color: #c5221f;
+                color: #f2545b;
             }
             QLabel#thumbnailMessage[state="empty"] {
-                color: #5f6368;
+                color: #bbbbbb;
             }
         """)
 
@@ -229,7 +230,7 @@ class GalleryView(QFrame):
         parent: QWidget,
         zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]],
         app_settings: Dict[str, Any],
-        cache: LRUCache,
+        cache_service: EnhancedCacheService,  # 修改参数类型
         zip_manager: ZipFileManager,
         config: Dict[str, Any],
         ensure_members_loaded_func: Callable[[str], Optional[List[str]]],
@@ -240,7 +241,7 @@ class GalleryView(QFrame):
 
         self.zip_files = zip_files
         self.app_settings = app_settings
-        self.cache = cache
+        self.cache_service = cache_service  # 修改属性名称
         self.zip_manager = zip_manager
         self.config = config
         self.ensure_members_loaded = ensure_members_loaded_func
@@ -275,7 +276,7 @@ class GalleryView(QFrame):
         self.title_label.setStyleSheet("""
             font-size: 24px;
             font-weight: 600;
-            color: #202124;
+            color: #e0e0e0;
         """)
         header_layout.addWidget(self.title_label)
         header_layout.addStretch()
@@ -283,8 +284,8 @@ class GalleryView(QFrame):
         self.count_label = QLabel(f"{len(self.zip_files)} archives")
         self.count_label.setStyleSheet("""
             font-size: 13px;
-            color: #3c4043;
-            background-color: #eef3ff;
+            color: #e0e0e0;
+            background-color: #4b6eaf;
             padding: 4px 10px;
             border-radius: 10px;
         """)
@@ -293,45 +294,38 @@ class GalleryView(QFrame):
 
         hint_label = QLabel("Arrow keys navigate • Enter opens • Esc clears selection")
         hint_label.setStyleSheet("""
-            color: #5f6368;
+            color: #bbbbbb;
             font-size: 12px;
         """)
         layout.addWidget(hint_label)
 
         self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
-        self.scroll_area.setFocusPolicy(Qt.NoFocus)
         self.scroll_area.setStyleSheet("""
-            QScrollArea { border: none; }
-            QScrollBar:vertical {
+            QScrollArea {
                 border: none;
-                background: #f4f5f7;
-                width: 10px;
-                border-radius: 5px;
-                margin: 0;
+                background-color: transparent;
             }
-            QScrollBar::handle:vertical {
-                background: #c7ccd1;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #aeb4bb;
+            QScrollArea > QWidget {
+                background-color: transparent;
             }
         """)
-
-        self.content_widget = QWidget()
-        self.grid_layout = QGridLayout(self.content_widget)
-        self.grid_layout.setAlignment(Qt.AlignTop)
-        self.grid_layout.setHorizontalSpacing(20)
-        self.grid_layout.setVerticalSpacing(25)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        self.grid_widget = QWidget()
+        self.grid_widget.setObjectName("gridWidget")
+        self.grid_widget.setStyleSheet("""
+            QWidget#gridWidget {
+                background-color: #2b2b2b;
+            }
+        """)
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.grid_layout.setSpacing(16)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.scroll_area.setWidget(self.content_widget)
+        
+        self.scroll_area.setWidget(self.grid_widget)
         layout.addWidget(self.scroll_area)
-
+        
         self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
         
     def populate(self):
@@ -494,9 +488,10 @@ class GalleryView(QFrame):
             return
 
         first_image = card.members[0]
-        cache_key = (card.zip_path, first_image)
+        # 创建包含目标尺寸的缓存键，避免完整图像和缩略图之间的缓存冲突
+        cache_key = ((card.zip_path, first_image), (210, 210))
 
-        cached_image = self.cache.get(cache_key)
+        cached_image = self.cache_service.get(cache_key)
         if cached_image is not None:
             try:
                 qimage = PIL.ImageQt.ImageQt(cached_image)
@@ -519,7 +514,7 @@ class GalleryView(QFrame):
                 img.load()
 
             img.thumbnail((210, 210), Image.Resampling.LANCZOS)
-            self.cache.put(cache_key, img)
+            self.cache_service.put(cache_key, img)
 
             qimage = PIL.ImageQt.ImageQt(img)
             pixmap = QPixmap.fromImage(qimage)
@@ -556,53 +551,3 @@ class GalleryView(QFrame):
         if self.selected_card:
             self.selected_card.set_selected(False)
             self.selected_card = None
-            self.on_selection_changed("", [], 0)
-
-    def _open_selected(self):
-        """Open viewer for selected card."""
-        if self.selected_card:
-            self._on_card_double_clicked(self.selected_card)
-
-    def _navigate_card(self, delta: int):
-        """Navigate to adjacent card."""
-        if not self.cards:
-            return
-
-        if self.selected_card is None:
-            target_card = self.cards[0]
-        else:
-            try:
-                current_index = self.cards.index(self.selected_card)
-                target_index = max(0, min(len(self.cards) - 1, current_index + delta))
-                target_card = self.cards[target_index]
-            except ValueError:
-                target_card = self.cards[0]
-
-        self._on_card_clicked(target_card)
-        self._ensure_card_visible(target_card)
-
-    def _navigate_to_first(self):
-        """Navigate to first card."""
-        if self.cards:
-            self._on_card_clicked(self.cards[0])
-            self._ensure_card_visible(self.cards[0])
-
-    def _navigate_to_last(self):
-        """Navigate to last card."""
-        if self.cards:
-            self._on_card_clicked(self.cards[-1])
-            self._ensure_card_visible(self.cards[-1])
-
-    def _ensure_card_visible(self, card: GalleryCard):
-        """Ensure the given card is visible in the scroll area."""
-        self.scroll_area.ensureWidgetVisible(card, 50, 50)
-
-    def update_performance_mode(self, enabled: bool):
-        """Update view for performance mode change."""
-        self.app_settings["performance_mode"] = enabled
-        QTimer.singleShot(100, self._load_visible_thumbnails)
-
-    def refresh_view(self):
-        """Refresh the gallery view."""
-        self.populate()
-

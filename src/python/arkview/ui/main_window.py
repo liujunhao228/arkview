@@ -36,6 +36,7 @@ from ..services.zip_service import ZipService
 from ..services.image_service import ImageService
 from ..services.thumbnail_service import ThumbnailService
 from ..services.config_service import ConfigService
+from ..services.cache_service import EnhancedCacheService
 
 # Import UI components
 from ..ui.dialogs import SettingsDialog
@@ -63,16 +64,19 @@ class MainWindow(QMainWindow):
         # Initialize state
         self._initialize_state()
         
+        # Apply dark theme
+        self._apply_dark_theme()
+        
     def _initialize_services(self):
         """Initialize all required services."""
         # Initialize core components
-        self.cache = LRUCache(CONFIG["CACHE_MAX_ITEMS_NORMAL"])
+        self.cache_service = EnhancedCacheService(CONFIG["CACHE_MAX_ITEMS_NORMAL"])
         self.zip_manager = ZipFileManager()
         
         # Initialize services
         self.zip_service = ZipService()
-        self.image_service = ImageService(self.cache, self.zip_manager)
-        self.thumbnail_service = ThumbnailService(self.cache, self.zip_manager, CONFIG)
+        self.image_service = ImageService(self.cache_service, self.zip_manager)
+        self.thumbnail_service = ThumbnailService(self.cache_service, self.zip_manager, CONFIG)
         self.config_service = ConfigService()
         
         # Connect thumbnail service signals
@@ -159,42 +163,90 @@ class MainWindow(QMainWindow):
         self.layout.setContentsMargins(0, 0, 0, 0)
 
         self.welcome_label = QLabel("Welcome to Arkview!\n\nDrop a folder here to begin.")
+        self.welcome_label.setObjectName("welcomeLabel")
         self.welcome_label.setAlignment(Qt.AlignCenter)
-        self.welcome_label.setStyleSheet("""
-            QLabel {
-                font-size: 18px;
-                color: #666666;
-                background-color: #f0f0f0;
-                border: 2px dashed #cccccc;
-                border-radius: 10px;
-                padding: 40px;
-            }
-        """)
 
         self.layout.addWidget(self.welcome_label)
         self.setCentralWidget(self.central_widget)
 
         self.drag_overlay = QLabel("Drop folders or archives to load", self.central_widget)
+        self.drag_overlay.setObjectName("dragOverlay")
         self.drag_overlay.setAlignment(Qt.AlignCenter)
-        self.drag_overlay.setStyleSheet("""
-            QLabel {
-                background-color: rgba(26, 115, 232, 0.15);
-                border: 2px dashed #1a73e8;
-                color: #1a73e8;
-                font-size: 18px;
-                font-weight: 600;
-                border-radius: 12px;
-            }
-        """)
         self.drag_overlay.hide()
         self.central_widget.installEventFilter(self)
         self._update_drag_overlay_geometry()
         
+    def _clear_central_widget(self):
+        """Clear all widgets from the central widget layout."""
+        while self.layout.count():
+            child = self.layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+                
     def _setup_status_bar(self):
         """Setup the status bar."""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
+        
+    def _apply_dark_theme(self):
+        """Apply dark theme stylesheet to the application."""
+        try:
+            # 获取当前文件所在目录
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            qss_path = os.path.join(current_dir, "dark_theme.qss")
+            
+            with open(qss_path, "r", encoding="utf-8") as f:
+                style_sheet = f.read()
+                self.setStyleSheet(style_sheet)
+        except FileNotFoundError:
+            # 如果找不到样式文件，使用默认的暗色样式
+            self.setStyleSheet("""
+                QMainWindow {
+                    background-color: #2b2b2b;
+                }
+                QLabel {
+                    color: #e0e0e0;
+                }
+                QMenuBar {
+                    background-color: #3c3f41;
+                    color: #bbbbbb;
+                }
+                QMenuBar::item:selected {
+                    background-color: #4b6eaf;
+                }
+                QMenu {
+                    background-color: #3c3f41;
+                    color: #bbbbbb;
+                }
+                QMenu::item:selected {
+                    background-color: #4b6eaf;
+                }
+                QToolBar {
+                    background-color: #3c3f41;
+                    border: none;
+                }
+                QStatusBar {
+                    background-color: #3c3f41;
+                    color: #bbbbbb;
+                }
+                QLabel#welcomeLabel {
+                    font-size: 18px;
+                    color: #aaaaaa;
+                    background-color: #2b2b2b;
+                    border: 2px dashed #555555;
+                    border-radius: 10px;
+                    padding: 40px;
+                }
+                QLabel#dragOverlay {
+                    background-color: rgba(75, 110, 175, 0.3);
+                    border: 2px dashed #4b6eaf;
+                    color: #4b6eaf;
+                    font-size: 18px;
+                    font-weight: 600;
+                    border-radius: 12px;
+                }
+            """)
         
     def _initialize_state(self):
         """Initialize application state."""
@@ -245,17 +297,16 @@ class MainWindow(QMainWindow):
         return zip_paths
         
     def _show_gallery_view(self):
-        """Show the gallery view with ZIP files."""
-        # Remove existing widgets
-        for i in reversed(range(self.layout.count())): 
-            self.layout.itemAt(i).widget().setParent(None)
-            
+        """Show the gallery view."""
+        # Clear current view
+        self._clear_central_widget()
+        
         # Create gallery view
         self.gallery_view = GalleryView(
             parent=self.central_widget,
             zip_files=self.zip_files,
             app_settings={"performance_mode": self.performance_mode},
-            cache=self.cache,
+            cache_service=self.cache_service,
             zip_manager=self.zip_manager,
             config=CONFIG,
             ensure_members_loaded_func=self._ensure_members_loaded,
@@ -325,7 +376,7 @@ class MainWindow(QMainWindow):
         # Update cache size
         cache_capacity = CONFIG[
             "CACHE_MAX_ITEMS_PERFORMANCE" if enabled else "CACHE_MAX_ITEMS_NORMAL"]
-        self.cache.resize(cache_capacity)
+        self.cache_service.resize_cache(cache_capacity)
         
         self.status_bar.showMessage(
             f"Performance mode {'enabled' if enabled else 'disabled'}")

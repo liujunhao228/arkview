@@ -8,7 +8,6 @@ from typing import Optional, Tuple
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from ..core.models import LoadResult
-from ..core.cache import LRUCache
 from ..core.file_manager import ZipFileManager
 
 
@@ -24,12 +23,34 @@ def _format_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024**3:.1f} GB"
 
 
+def _generate_cache_key(zip_path: str, member_name: str, target_size: Optional[Tuple[int, int]]) -> tuple:
+    """
+    生成缓存键，确保不同尺寸的图像使用不同的键
+    
+    Args:
+        zip_path: ZIP文件路径
+        member_name: ZIP内成员名称
+        target_size: 目标尺寸 (width, height) 或 None 表示原始尺寸
+        
+    Returns:
+        tuple: 缓存键
+    """
+    if target_size is None:
+        return (zip_path, member_name, "original")
+    else:
+        width, height = target_size
+        return (zip_path, member_name, f"{width}x{height}")
+
+
 class ImageService:
     """Service for handling image loading and processing operations."""
     
-    def __init__(self, cache: LRUCache, zip_manager: ZipFileManager):
-        self.cache = cache
+    def __init__(self, cache_service, zip_manager: ZipFileManager):
+        # 支持两种类型的缓存服务以保持向后兼容
+        self.cache_service = cache_service
         self.zip_manager = zip_manager
+        # 判断是否使用增强的缓存服务
+        self.use_enhanced_cache = hasattr(cache_service, 'get_stats')
 
     def load_image_data_async(
         self,
@@ -45,8 +66,20 @@ class ImageService:
         Asynchronously loads image data from a ZIP archive member.
         This method can be called synchronously but is designed to work with async patterns.
         """
+        # 使用改进的缓存键生成方法
+        enhanced_cache_key = _generate_cache_key(zip_path, member_name, target_size)
+        
+        # 确定使用哪种缓存类型
+        cache_type = "thumbnail" if target_size is not None else "primary"
+        
+        # 尝试从缓存获取
         if not force_reload:
-            cached_image = self.cache.get(cache_key)
+            cached_image = None
+            if self.use_enhanced_cache:
+                cached_image = self.cache_service.get(enhanced_cache_key, cache_type)
+            else:
+                cached_image = self.cache_service.get(enhanced_cache_key)
+                
             if cached_image is not None:
                 try:
                     if target_size:
@@ -56,67 +89,47 @@ class ImageService:
                             else Image.Resampling.LANCZOS
                         )
                         img_to_process.thumbnail(target_size, resampling_method)
-                        result = LoadResult(success=True, data=img_to_process, cache_key=cache_key)
+                        result = LoadResult(success=True, data=img_to_process, cache_key=enhanced_cache_key)
                     else:
                         # Return the cached image directly if no resizing needed
-                        result = LoadResult(success=True, data=cached_image, cache_key=cache_key)
+                        result = LoadResult(success=True, data=cached_image, cache_key=enhanced_cache_key)
                     
                     return result
                 except Exception as e:
-                    print(f"Async Load Warning: Error processing cached image for {cache_key}: {e}")
-
-        zf = self.zip_manager.get_zipfile(zip_path)
-        if zf is None:
-            result = LoadResult(success=False, error_message="Cannot open ZIP", cache_key=cache_key)
-            return result
-
+                    print(f"Async Load Warning: Error processing cached image for {enhanced_cache_key}: {e}")
+        
+        # 缓存未命中或强制重新加载，执行实际加载
         try:
-            member_info = zf.getinfo(member_name)
-
-            if member_info.file_size == 0:
-                result = LoadResult(success=False, error_message="Image file empty", cache_key=cache_key)
-                return result
-                
-            if member_info.file_size > max_load_size:
-                err_msg = f"Too large ({_format_size(member_info.file_size)} > {_format_size(max_load_size)})"
-                result = LoadResult(success=False, error_message=err_msg, cache_key=cache_key)
-                return result
-
-            image_data = zf.read(member_name)
-            with io.BytesIO(image_data) as image_stream:
-                img = ImageOps.exif_transpose(Image.open(image_stream))
-                img.load()
-
-            # Cache the original loaded image
-            self.cache.put(cache_key, img)
-
-            # Prepare display image
+            # 获取ZIP文件句柄
+            zip_file = self.zip_manager.get_zipfile(zip_path)
+            if zip_file is None:
+                return LoadResult(success=False, error_message="Failed to open ZIP file", cache_key=enhanced_cache_key)
+            
+            # 读取图像数据
+            with zip_file.open(member_name) as file:
+                image_data = file.read()
+            
+            # 加载图像
+            img = Image.open(io.BytesIO(image_data))
+            
+            # 根据目标尺寸处理图像
             if target_size:
                 resampling_method = (
                     Image.Resampling.NEAREST if performance_mode
                     else Image.Resampling.LANCZOS
                 )
-                img_thumb = img.copy()
-                img_thumb.thumbnail(target_size, resampling_method)
-                result = LoadResult(success=True, data=img_thumb, cache_key=cache_key)
-            else:
-                result = LoadResult(success=True, data=img, cache_key=cache_key)
+                img.thumbnail(target_size, resampling_method)
             
+            # 缓存处理后的图像
+            if self.use_enhanced_cache:
+                self.cache_service.put(enhanced_cache_key, img, cache_type)
+            else:
+                self.cache_service.put(enhanced_cache_key, img)
+            
+            result = LoadResult(success=True, data=img, cache_key=enhanced_cache_key)
             return result
-
-        except KeyError:
-            result = LoadResult(success=False, error_message=f"Member '{member_name}' not found", cache_key=cache_key)
-            return result
-        except UnidentifiedImageError:
-            result = LoadResult(success=False, error_message="Invalid image format", cache_key=cache_key)
-            return result
-        except Image.DecompressionBombError:
-            result = LoadResult(success=False, error_message="Decompression Bomb", cache_key=cache_key)
-            return result
-        except MemoryError:
-            result = LoadResult(success=False, error_message="Out of memory", cache_key=cache_key)
-            return result
+            
         except Exception as e:
-            print(f"Async Load Error: Failed processing {cache_key}: {type(e).__name__} - {e}")
-            result = LoadResult(success=False, error_message=f"Load error: {type(e).__name__}", cache_key=cache_key)
-            return result
+            error_msg = f"Failed to load image {member_name} from {zip_path}: {str(e)}"
+            print(error_msg)
+            return LoadResult(success=False, error_message=error_msg, cache_key=enhanced_cache_key)

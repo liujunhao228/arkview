@@ -15,7 +15,7 @@ from .services.zip_service import ZipService
 from .services.image_service import ImageService
 from .services.thumbnail_service import ThumbnailService
 from .services.config_service import ConfigService
-from .services.cache_service import CacheService
+from .services.cache_service import CacheService, EnhancedCacheService
 
 # Expose core components
 from .core.cache import LRUCache
@@ -33,6 +33,7 @@ __all__ = [
     "ThumbnailService",
     "ConfigService",
     "CacheService",
+    "EnhancedCacheService",
     "LRUCache",
     "ZipFileManager",
     "LoadResult",
