@@ -16,115 +16,141 @@ from PySide6.QtGui import QPixmap, QPalette, QColor
 from PIL import Image
 import PIL.ImageQt
 
-from .core import ZipFileManager, LRUCache, load_image_data_async, _format_size
+from .core import ZipFileManager, LRUCache, load_image_data_async, _format_size, ImageLoaderSignals
 
 
-class ThumbnailWorker(QObject):
-    """Worker object for handling thumbnail loading in a separate thread."""
+class GalleryThumbnailWorker(QObject):
+    """Worker object for handling gallery thumbnail loading."""
     thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
-    finished = Signal()
+    load_thumbnail = Signal(str, str, tuple, int, tuple, bool)  # 添加信号定义
+    finished = Signal()  # 添加finished信号
     
-    def __init__(self, gallery_queue):
+    def __init__(self, cache, zip_manager, config):
         super().__init__()
-        self.gallery_queue = gallery_queue
-        self.running = True
+        self.cache = cache
+        self.zip_manager = zip_manager
+        self.config = config
+        self.running = True  # 添加 running 属性以保持接口一致
+        # 连接信号到槽
+        self.load_thumbnail.connect(self.process_load_thumbnail)
         
-    @Slot()
-    def processThumbnails(self):
-        """Process thumbnail loading tasks."""
+    @Slot(str, str, tuple, int, tuple, bool)
+    def process_load_thumbnail(self, zip_path: str, member_path: str, cache_key: tuple,
+                              max_size: int, resize_params: tuple, performance_mode: bool):
+        """Load a thumbnail in a worker thread."""
         try:
-            while self.running:
-                try:
-                    result = self.gallery_queue.get(timeout=0.1)
-                    if result:
-                        self.thumbnailLoaded.emit(result, getattr(result, 'cache_key', None))
-                except queue.Empty:
-                    # Timeout, continue loop
-                    continue
-                except Exception as e:
-                    print(f"Error processing thumbnail: {e}")
+            # Create signals instance for this load operation
+            signals = ImageLoaderSignals()
+            signals.image_loaded.connect(lambda result: self.thumbnailLoaded.emit(result, cache_key))
+            
+            # Call the async loading function with signals
+            load_image_data_async(
+                zip_path, member_path, max_size, resize_params,
+                signals, self.cache, cache_key, self.zip_manager, performance_mode
+            )
         except Exception as e:
-            print(f"Fatal error in thumbnail worker: {e}")
+            print(f"Error loading gallery thumbnail: {e}")
         finally:
+            # 发出finished信号
             self.finished.emit()
-        
-        
+
+
 class GalleryView(QFrame):
     """Gallery view component with mobile-like UX and modern design."""
 
     def __init__(
         self,
-        parent,
+        parent: QWidget,
         zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]],
         app_settings: Dict[str, Any],
         cache: LRUCache,
-        thread_pool,
         zip_manager: ZipFileManager,
         config: Dict[str, Any],
-        ensure_members_loaded_callback: Callable,
-        selection_callback: Optional[Callable[[str, List[str], int], None]] = None,
-        open_viewer_callback: Optional[Callable[[str, List[str], int], None]] = None
+        ensure_members_loaded_func: Callable[[str], Optional[List[str]]],
+        on_selection_changed: Callable[[str, List[str], int], None],
+        open_viewer_func: Callable[[str, List[str], int], None]
     ):
         super().__init__(parent)
-
         self.zip_files = zip_files
         self.app_settings = app_settings
         self.cache = cache
-        self.thread_pool = thread_pool
         self.zip_manager = zip_manager
         self.config = config
-        self.ensure_members_loaded = ensure_members_loaded_callback
-        self.selection_callback = selection_callback
-        self.open_viewer_callback = open_viewer_callback
+        self.ensure_members_loaded = ensure_members_loaded_func
+        self.on_selection_changed = on_selection_changed
+        self.open_viewer_func = open_viewer_func
 
-        self.gallery_columns = 3
-        self.min_card_width = 200
-        self.gallery_thumbnails: Dict[str, QPixmap] = {}
-        self.gallery_cards: Dict[str, QWidget] = {}  # Changed from tk.Frame to QWidget
-        self.gallery_thumb_labels: Dict[str, QLabel] = {}
-        self.gallery_title_labels: Dict[str, QLabel] = {}
-        self.gallery_selected_zip: Optional[str] = None
-        self.gallery_selected_index: int = 0
-        self.gallery_image_index: int = 0
-        self.gallery_current_members: Optional[List[str]] = None
-        self.display_mode = "gallery"  # "gallery" or "album"
-        self.current_album_zip_path: Optional[str] = None  # 添加当前专辑zip路径属性
-        self.gallery_queue: queue.Queue = queue.Queue()
-        self.gallery_thumbnail_requests: Dict[Tuple[str, str], str] = {}
-        self._gallery_thumbnail_after_id: Optional[str] = None
-
-        # For optimizing scrolling
-        self._visible_items_range = (0, 0)
-        self._last_canvas_y = 0
-
-        # Setup threaded thumbnail loading
-        self.thumbnail_thread = QThread()
-        self.thumbnail_worker = ThumbnailWorker(self.gallery_queue)
-        self.thumbnail_worker.moveToThread(self.thumbnail_thread)
-        self.thumbnail_worker.thumbnailLoaded.connect(self._handle_thumbnail_result_slot)
-        self.thumbnail_thread.started.connect(self.thumbnail_worker.processThumbnails)
-        self.thumbnail_thread.start()
-
-        # Add cleanup connection
-        self.destroyed.connect(self._cleanup_worker)
-
-        self._setup_ui()
+        # 移除对thread_pool的依赖，使用Qt信号槽机制
         
-        # Apply dark theme
+        # Gallery cards storage
+        self.cards: List[GalleryCard] = []
+        self.card_mapping: Dict[Tuple[str, str], GalleryCard] = {}
+        
+        # Threading components for background loading
+        self.loading_thread = QThread()
+        self.loading_worker = GalleryThumbnailWorker(
+            self.cache, self.zip_manager, self.config
+        )
+        self.loading_worker.moveToThread(self.loading_thread)
+        # 连接 load_thumbnail 信号到其处理槽
+        self.loading_worker.load_thumbnail.connect(self.loading_worker.process_load_thumbnail)
+        self.loading_worker.thumbnailLoaded.connect(self._on_thumbnail_loaded)
+        self.loading_worker.finished.connect(self.loading_thread.quit)
+        self.loading_thread.start()
+        
+        # UI state
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        self.gallery_widget = QWidget()
+        self.gallery_layout = QGridLayout(self.gallery_widget)
+        self.gallery_layout.setContentsMargins(10, 10, 10, 10)
+        self.gallery_layout.setSpacing(10)
+        
+        self.scroll_area.setWidget(self.gallery_widget)
+        
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(self.scroll_area)
+        
         self._apply_dark_theme()
 
     @Slot(object, tuple)
     def _handle_thumbnail_result_slot(self, result, cache_key):
         """Handle thumbnail result from worker thread."""
         self._handle_thumbnail_result(result, cache_key)
+        # Force UI refresh if needed
+        if hasattr(self, 'gallery_widget') and self.gallery_widget:
+            self.gallery_widget.show()
+            self.gallery_widget.repaint()
 
     def _cleanup_worker(self):
         """Clean up worker thread resources."""
+        # 停止缩略图工作线程
         if hasattr(self, 'thumbnail_worker'):
             self.thumbnail_worker.running = False
         if hasattr(self, 'thumbnail_thread'):
             self.thumbnail_thread.quit()
             self.thumbnail_thread.wait(1000)  # Wait up to 1 second
+            
+        # 停止画廊缩略图工作线程
+        if hasattr(self, 'gallery_thumbnail_worker'):
+            # 如果未来需要在 GalleryThumbnailWorker 中加入中断逻辑，可以在这里设置标志
+            pass
+        if hasattr(self, 'gallery_thumbnail_thread'):
+            self.gallery_thumbnail_thread.quit()
+            self.gallery_thumbnail_thread.wait(1000)  # Wait up to 1 second
+
+    def closeEvent(self, event):
+        """Handle view closing."""
+        try:
+            self._cleanup_worker()
+        except Exception as e:
+            # Ignore errors during cleanup
+            pass
+        super().closeEvent(event)
 
     def _apply_dark_theme(self):
         """Apply dark theme to the gallery view."""
@@ -218,25 +244,34 @@ class GalleryView(QFrame):
         self.gallery_container = scroll_area
 
     def populate(self):
-        """Populate gallery with thumbnails of ZIP files."""
-        # Ensure we're in gallery view mode
-        self._prepare_gallery_view()
+        """Populate the gallery with images from all ZIP files."""
+        # Clear existing cards
+        self.clear()
         
-        # Clear existing content
-        self._clear_gallery_content()
-
-        zip_paths = list(self.zip_files.keys())
-        if not zip_paths:
-            self._show_empty_gallery_message()
-            return
-
-        self.gallery_count_label.setText(f"{len(zip_paths)} albums")
-
-        # Calculate number of columns based on available width
-        self._calculate_columns_for_gallery_view()
-
-        # Create cards for each ZIP file
-        self._create_gallery_cards(zip_paths)
+        # Create cards for all images in all ZIP files
+        for zip_path, (members, _, _, _) in self.zip_files.items():
+            if not members:
+                # Try to load members if not available
+                members = self.ensure_members_loaded(zip_path)
+                if not members:
+                    continue
+                    
+            for member_name in members:
+                card = GalleryCard(zip_path, member_name, self)
+                card.clicked.connect(self._on_card_clicked)
+                self.gallery_layout.addWidget(card)
+                self.cards.append(card)
+                self.card_mapping[(zip_path, member_name)] = card
+                
+        # Trigger initial thumbnail loading and processing
+        QTimer.singleShot(0, self._reflow_gallery_cards)
+        
+    def clear(self):
+        """Clear all gallery cards."""
+        for card in self.cards:
+            card.setParent(None)
+        self.cards.clear()
+        self.card_mapping.clear()
 
     def _prepare_gallery_view(self):
         """Prepare the gallery view mode."""
@@ -318,6 +353,10 @@ class GalleryView(QFrame):
 
         # Request thumbnail
         self._request_card_thumbnail(zip_path)
+        
+        # Force refresh
+        card_container.show()
+        card_container.repaint()
 
     def _create_card_container(self) -> QWidget:
         """Create the main container for a gallery card."""
@@ -398,6 +437,20 @@ class GalleryView(QFrame):
                 thumb_label.setText("⚠️")
                 thumb_label.setStyleSheet("color: #ff7b72; font-size: 28pt;")
 
+    def _request_gallery_thumbnail_for_unloaded_members(self, zip_path: str):
+        """Request thumbnail for a gallery card that hasn't loaded members yet."""
+        # Load members first
+        members = self.ensure_members_loaded(zip_path)
+        if members:
+            # Now request thumbnail with first member
+            self._request_gallery_thumbnail(zip_path, members[0])
+        else:
+            # Show error if no members
+            thumb_label = self.gallery_thumb_labels.get(zip_path)
+            if thumb_label:
+                thumb_label.setText("⚠️")
+                thumb_label.setStyleSheet("color: #ff7b72; font-size: 28pt;")
+
     def _on_gallery_card_click(self, zip_path: str):
         """Handle gallery card click event - show album content in gallery view."""
         self._show_album_view(zip_path)
@@ -416,56 +469,36 @@ class GalleryView(QFrame):
                 label.setPixmap(existing_thumb)
                 label.setText("")
                 label.setStyleSheet("background-color: #1f2224;")
+                # Force refresh
+                label.show()
+                label.repaint()
             return
 
         # Store the zip path to use as card key later
         self.gallery_thumbnail_requests[cache_key] = zip_path
 
-        self.thread_pool.submit(
-            load_image_data_async,
-            zip_path,
-            member_path,
+        # 使用工作线程加载缩略图
+        # Emit signal to worker thread
+        self.gallery_thumbnail_worker.load_thumbnail.emit(
+            zip_path, member_path,
+            cache_key,
             self.app_settings['max_thumbnail_size'],
             self.config["GALLERY_THUMB_SIZE"],
-            self.gallery_queue,
-            self.cache,
-            cache_key,
-            self.zip_manager,
             self.app_settings['performance_mode']
         )
-
-        # With our threaded approach, we don't need explicit polling scheduling
-        # The worker thread will emit signals when thumbnails are ready
-
-    def _request_gallery_thumbnail_for_unloaded_members(self, zip_path: str):
-        """Request thumbnail for a ZIP file with unloaded members."""
-        def load_and_request():
-            try:
-                # Load members
-                members = self.ensure_members_loaded(zip_path)
-                if members and len(members) > 0:
-                    # Get first image as thumbnail
-                    first_image = members[0]
-                    self._request_gallery_thumbnail(zip_path, first_image)
-            except Exception as e:
-                print(f"Error loading members for {zip_path}: {e}")
-                # Show error in UI from the main thread
-                # Since this is in a thread, we'd need to emit a signal or use invokeMethod
-
-        # Submit to thread pool
-        self.thread_pool.submit(load_and_request)
 
     def resizeEvent(self, event):
         """Handle resize events to reflow gallery cards."""
         super().resizeEvent(event)
         # Recalculate columns based on new width
-        available_width = self.gallery_inner_widget.width()
-        if available_width > 0:
-            if self.display_mode == "gallery" and self.gallery_cards:
-                calculated_columns = max(1, available_width // 250)  # Match card width
-                if calculated_columns != self.gallery_columns:
+        if hasattr(self, 'gallery_widget') and self.gallery_widget:
+            available_width = self.gallery_widget.width()
+            if available_width > 0:
+                # Note: Using gallery_layout instead of non-existent gallery_inner_layout
+                calculated_columns = max(1, available_width // 250)  # Adjust for card width
+                if hasattr(self, 'gallery_columns') and calculated_columns != self.gallery_columns:
                     self.gallery_columns = calculated_columns
-                    self._reflow_cards()
+                    self._reflow_gallery_cards()
             elif self.display_mode == "album":
                 calculated_columns = max(1, available_width // 240)  # 220px卡片宽度 + 20px间距
                 if calculated_columns != self.gallery_columns:
@@ -481,21 +514,58 @@ class GalleryView(QFrame):
             self._reflow_gallery_cards()
         elif self.display_mode == "album" and self.current_album_zip_path:
             self._reflow_album_cards()
+        
+        # Force refresh the layout
+        self.gallery_inner_widget.show()
+        self.gallery_inner_widget.repaint()
 
     def _clear_layout_widgets(self):
         """Clear all widgets from the gallery layout."""
-        for i in reversed(range(self.gallery_inner_layout.count())):
-            widget = self.gallery_inner_layout.itemAt(i).widget()
-            if widget:
-                self.gallery_inner_layout.removeWidget(widget)
+        if hasattr(self, 'gallery_layout'):
+            for i in reversed(range(self.gallery_layout.count())):
+                widget = self.gallery_layout.itemAt(i).widget()
+                if widget:
+                    self.gallery_layout.removeWidget(widget)
 
     def _reflow_gallery_cards(self):
-        """Reflow gallery cards in gallery view mode."""
-        zip_paths = list(self.gallery_cards.keys())
-        for idx, zip_path in enumerate(zip_paths):
-            row = idx // self.gallery_columns
-            col = idx % self.gallery_columns
-            self.gallery_inner_layout.addWidget(self.gallery_cards[zip_path], row, col)
+        """Reflow gallery cards based on current viewport."""
+        if not hasattr(self, 'cards') or not self.cards:
+            return
+            
+        # Calculate visible area
+        if not hasattr(self, 'scroll_area') or not self.scroll_area:
+            return
+            
+        scroll_pos = self.scroll_area.verticalScrollBar().value()
+        viewport_height = self.scroll_area.viewport().height()
+        card_height = 200  # Approximate card height
+        spacing = 10       # Spacing between cards
+        
+        # Calculate which cards should be visible
+        start_index = max(0, (scroll_pos // (card_height + spacing)) - 5)  # Add buffer
+        visible_count = (viewport_height // (card_height + spacing)) + 10   # Add buffer
+        
+        # Clear layout
+        if hasattr(self, 'gallery_layout'):
+            for i in reversed(range(self.gallery_layout.count())):
+                widget = self.gallery_layout.itemAt(i).widget()
+                if widget:
+                    self.gallery_layout.removeWidget(widget)
+                
+        # Add visible cards back to layout
+        end_index = min(len(self.cards), start_index + visible_count)
+        for i in range(start_index, end_index):
+            if hasattr(self, 'gallery_layout'):
+                self.gallery_layout.addWidget(self.cards[i])
+            
+        # Request thumbnails for visible cards
+        for i in range(start_index, end_index):
+            card = self.cards[i]
+            # 使用正确的参数调用_request_gallery_thumbnail
+            if hasattr(self, 'loading_worker') and self.loading_worker:
+                self._queue_gallery_thumbnail(card.zip_path, card.member_name)
+            
+        # 不再需要处理队列，因为使用了Qt信号槽机制
 
     def _reflow_album_cards(self):
         """Reflow image cards in album view mode."""
@@ -512,83 +582,44 @@ class GalleryView(QFrame):
                     card_key = f"{self.current_album_zip_path}:{idx}"
                     if card_key in self.gallery_cards:
                         self.gallery_inner_layout.addWidget(self.gallery_cards[card_key], row, col)
+                # Force refresh the layout
+                self.gallery_inner_widget.show()
+                self.gallery_inner_widget.repaint()
 
-    def _schedule_gallery_thumbnail_poll(self):
-        """Schedule thumbnail polling with debouncing."""
-        # We don't need to do anything here anymore because we're using a dedicated 
-        # worker thread that processes results as they come in through signals
-        # This approach is safer than trying to use QTimer from arbitrary threads
-        pass
-
-    def _process_gallery_thumbnail_queue(self):
-        """Process any pending gallery thumbnail requests."""
-        # This method serves as a placeholder since the actual processing
-        # happens in the worker thread connected to the thumbnailLoaded signal
-        pass
-
-    def _handle_thumbnail_result(self, result, cache_key):
-        """Process a single thumbnail result."""
-        if not result or not cache_key:
-            return
-            
-        # Extract card key from cache_key
-        card_key = self._extract_card_key_from_result(type('obj', (object,), {'cache_key': cache_key}))
-        if not card_key:
-            return
-
-        label = self.gallery_thumb_labels.get(card_key)
-        if not label:
-            return
-
-        if hasattr(result, 'success') and result.success and hasattr(result, 'data') and result.data:
-            try:
-                # Convert PIL image to QPixmap
-                qimage = PIL.ImageQt.ImageQt(result.data)
-                pixmap = QPixmap.fromImage(qimage)
-                self.gallery_thumbnails[card_key] = pixmap
-                
-                # Scale with aspect ratio preservation instead of stretching
-                scaled_pixmap = pixmap.scaled(
-                    210, 180,  # 略小于容器尺寸以避免边缘被裁剪
-                    Qt.KeepAspectRatio, 
-                    Qt.SmoothTransformation
-                )
-                label.setPixmap(scaled_pixmap)
-                label.setText("")
-                label.setStyleSheet("background-color: #1f2224; padding: 5px;")
-            except Exception as e:
-                print(f"Error creating QPixmap for {card_key}: {e}")
-                self._set_error_thumbnail(label)
+    @Slot(object, tuple)
+    def _handle_gallery_thumbnail_loaded(self, result, cache_key):
+        """处理画廊缩略图加载结果"""
+        if result.success and cache_key:
+            # 更新UI
+            zip_path = cache_key[0]
+            pixmap = result.data
+            if pixmap:
+                # Convert PIL Image to QPixmap
+                qimage = PIL.ImageQt.ImageQt(pixmap)
+                qpixmap = QPixmap.fromImage(qimage)
+                self.gallery_thumbnails[zip_path] = qpixmap
+                label = self.gallery_thumb_labels.get(zip_path)
+                if label:
+                    label.setPixmap(qpixmap)
+                    label.setText("")
+                    label.setStyleSheet("background-color: #1f2224;")
+                    # Force refresh
+                    label.show()
+                    label.repaint()
         else:
-            self._set_error_thumbnail(label)
-
-        # Clean up request record
-        self._cleanup_thumbnail_request(type('obj', (object,), {'cache_key': cache_key}))
-
-    def _extract_card_key_from_result(self, result):
-        """Extract card key from a thumbnail result."""
-        if isinstance(result.cache_key, tuple):
-            if len(result.cache_key) == 2:
-                # Gallery view: (zip_path, member_path)
-                if not isinstance(result.cache_key[0], tuple):
-                    return self.gallery_thumbnail_requests.get(result.cache_key)
-                # Album view: ((zip_path, member_path), card_key) - Not implemented in this version yet
-                else:
-                    return result.cache_key[1]
-        return None
-
-
-    def _set_error_thumbnail(self, label):
-        """Display an error thumbnail."""
-        label.setText("⚠️")
-        label.setStyleSheet("color: #ff7b72; font-size: 28pt; background-color: #1f2224;")
-
-    def _cleanup_thumbnail_request(self, result):
-        """Clean up thumbnail request records."""
-        # Only clean up gallery view requests, not album view requests
-        if isinstance(result.cache_key, tuple) and len(result.cache_key) == 2 and not isinstance(result.cache_key[0], tuple):
-            if result.cache_key in self.gallery_thumbnail_requests:
-                del self.gallery_thumbnail_requests[result.cache_key]
+            # 显示错误
+            zip_path = cache_key[0] if cache_key else "unknown"
+            label = self.gallery_thumb_labels.get(zip_path)
+            if label:
+                label.setText("⚠️")
+                label.setStyleSheet("color: #ff7b72; font-size: 28pt;")
+                # Force refresh
+                label.show()
+                label.repaint()
+                
+        # 从请求列表中移除
+        if cache_key in self.gallery_thumbnail_requests:
+            del self.gallery_thumbnail_requests[cache_key]
 
     def _show_gallery_view(self, event=None):
         """Show the ZIP file gallery view."""
@@ -636,6 +667,12 @@ class GalleryView(QFrame):
         
         # Create grid for album view based on calculated columns
         self._create_album_grid(zip_path, members)
+        
+        # Force UI refresh
+        self.gallery_inner_widget.show()
+        self.gallery_inner_widget.repaint()
+        self.gallery_container.show()
+        self.gallery_container.repaint()
 
     def _clear_gallery_content(self):
         """Clear all content from the gallery view."""
@@ -717,12 +754,16 @@ class GalleryView(QFrame):
 
         # Connect click event
         self._connect_image_card_click_events(zip_path, member_path, index, card_container, thumb_label, title_label, info_frame)
-
+        
         # Add to layout
         self.gallery_inner_layout.addWidget(card_container, row, col)
 
-        # Request thumbnail
+        # Request thumbnail for this image
         self._request_image_thumbnail(zip_path, member_path, card_key)
+        
+        # Force refresh
+        card_container.show()
+        card_container.repaint()
 
     def _create_image_card_container(self) -> QWidget:
         """Create the main container for an image card."""
@@ -768,46 +809,54 @@ class GalleryView(QFrame):
         title_label.setMaximumHeight(20)  # 限制标题高度
         return title_label
 
+    def _request_image_thumbnail(self, zip_path: str, member_path: str, card_key: str):
+        """Request thumbnail for a specific image in album view."""
+        cache_key = (zip_path, member_path)
+        
+        # Check if already cached
+        cached_result = self.cache.get(cache_key)
+        # LRUCache中存储的是Image对象而不是LoadResult对象
+        if cached_result:
+            label = self.gallery_thumb_labels.get(card_key)
+            if label:
+                # Convert PIL Image to QPixmap
+                qimage = PIL.ImageQt.ImageQt(cached_result)
+                qpixmap = QPixmap.fromImage(qimage)
+                label.setPixmap(qpixmap)
+                label.setText("")
+                label.setStyleSheet("background-color: #1f2224;")
+                # Force refresh
+                label.show()
+                label.repaint()
+            return
+
+        # Use gallery thumbnail worker to load thumbnail
+        self.gallery_thumbnail_worker.load_thumbnail.emit(
+            zip_path, 
+            member_path,
+            cache_key,
+            self.app_settings['max_thumbnail_size'],
+            self.config["GALLERY_THUMB_SIZE"],
+            self.app_settings['performance_mode']
+        )
+
     def _connect_image_card_click_events(self, zip_path: str, member_path: str, index: int,
                                        card_container: QWidget, thumb_label: QLabel, 
                                        title_label: QLabel, info_frame: QWidget):
         """Connect click events for all parts of the image card."""
-        thumb_label.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
-        title_label.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
-        info_frame.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
-        card_container.mousePressEvent = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
-
-    def _request_image_thumbnail(self, zip_path: str, member_path: str, card_key: str):
-        """Request thumbnail for an image in album view."""
-        cache_key = (zip_path, member_path)
-
-        # Use special format to distinguish album view from gallery view
-        special_key = (cache_key, card_key)
-
-        self.thread_pool.submit(
-            load_image_data_async,
-            zip_path,
-            member_path,
-            self.app_settings['max_thumbnail_size'],
-            self.config["GALLERY_THUMB_SIZE"],
-            self.gallery_queue,
-            self.cache,
-            special_key,
-            self.zip_manager,
-            self.app_settings['performance_mode']
-        )
+        handler = lambda event, z=zip_path, m=member_path, i=index: self._on_image_card_click(z, m, i)
+        thumb_label.mousePressEvent = handler
+        title_label.mousePressEvent = handler
+        info_frame.mousePressEvent = handler
+        card_container.mousePressEvent = handler
 
     def _on_image_card_click(self, zip_path: str, member_path: str, index: int):
-        """Handle image card click event."""
-        # Open viewer showing this image
+        """Handle image card click event - open viewer."""
         if self.open_viewer_callback:
-            # Get all members of the ZIP file
+            # Get all members for this ZIP
             entry = self.zip_files.get(zip_path)
             if entry:
-                members = entry[0]
-                if members is None:
-                    members = self.ensure_members_loaded(zip_path)
-
+                members = self._get_members_for_zip(zip_path, entry)
                 if members:
                     self.open_viewer_callback(zip_path, members, index)
 
@@ -846,3 +895,48 @@ class GalleryView(QFrame):
             """)
         return super().eventFilter(source, event)
 
+    def _queue_gallery_thumbnail(self, zip_path: str, member_name: str):
+        """Queue a gallery thumbnail for loading."""
+        cache_key = (zip_path, member_name)
+        
+        # Check if already cached
+        if cache_key in self.cache:
+            cached_result = self.cache.get(cache_key)
+            card = self.card_mapping.get(cache_key)
+            if card and cached_result:
+                card.set_thumbnail(cached_result)
+            return
+
+        # Add to loading queue using Qt signals instead of standard Queue
+        self.loading_worker.load_thumbnail.emit(
+            zip_path,
+            member_name,
+            cache_key,
+            self.app_settings['max_thumbnail_size'],
+            self.config["GALLERY_THUMB_SIZE"], 
+            self.app_settings['performance_mode']
+        )
+
+    @Slot(object, tuple)
+    def _on_thumbnail_loaded(self, result, cache_key):
+        """Handle loaded thumbnail result."""
+        # Find the corresponding card
+        card = self.card_mapping.get(cache_key)
+        if card:
+            if result.success and result.data:
+                try:
+                    # Convert PIL Image to QPixmap
+                    qimage = PIL.ImageQt.ImageQt(result.data)
+                    qpixmap = QPixmap.fromImage(qimage)
+                    card.set_thumbnail(qpixmap)
+                except Exception as e:
+                    print(f"Error converting image for gallery card: {e}")
+                    card.set_error(str(e))
+            else:
+                error_msg = result.error_message if hasattr(result, 'error_message') else "Unknown error"
+                card.set_error(error_msg)
+                
+    def closeEvent(self, event):
+        """Handle view closing."""
+        self._cleanup_worker()
+        super().closeEvent(event)

@@ -5,12 +5,14 @@ Core module integrating Rust backend with Python frontend.
 import io
 import os
 import threading
-import queue
 from typing import Optional, List, Tuple, Union
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+
+# Qt imports for signals
+from PySide6.QtCore import QObject, Signal
 
 try:
     from . import arkview_core
@@ -21,6 +23,18 @@ except ImportError:
     RUST_AVAILABLE = False
     ZipScannerRust = None
     ImageProcessorRust = None
+
+
+def _format_size(size_bytes: int) -> str:
+    """Formats byte size into a human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024**2:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024**3:
+        return f"{size_bytes / 1024**2:.1f} MB"
+    else:
+        return f"{size_bytes / 1024**3:.1f} GB"
 
 
 class LRUCache:
@@ -259,37 +273,43 @@ class ZipScanner:
         Analyzes a ZIP file with timeout protection using threading for cross-platform compatibility.
         """
         import threading
-        from queue import Queue
 
-        result_queue = Queue()
+        # Result container
+        result_container = {'type': None, 'data': None}
+        result_lock = threading.Lock()
+        result_event = threading.Event()
 
         def target():
             try:
                 result = self.analyze_zip(zip_path, collect_members)
-                result_queue.put(('success', result))
+                with result_lock:
+                    result_container['type'] = 'success'
+                    result_container['data'] = result
+                result_event.set()
             except Exception as e:
-                result_queue.put(('error', (type(e).__name__, str(e))))
+                with result_lock:
+                    result_container['type'] = 'error'
+                    result_container['data'] = (type(e).__name__, str(e))
+                result_event.set()
 
         thread = threading.Thread(target=target)
         thread.daemon = True
         thread.start()
-        thread.join(timeout)
+        completed = result_event.wait(timeout)
 
-        if thread.is_alive():
+        if not completed:
             # Thread is still running, meaning it timed out
             print(f"Timeout analyzing {zip_path}")
             return False, None, None, None, 0
         else:
-            try:
-                result_type, result = result_queue.get_nowait()
-                if result_type == 'success':
-                    return result
-                else:
-                    print(f"Error analyzing {zip_path}: {result[0]} - {result[1]}")
-                    return False, None, None, None, 0
-            except:
-                # Could not get result, probably cancelled
-                print(f"Cancelled analyzing {zip_path}")
+            with result_lock:
+                result_type = result_container['type']
+                result_data = result_container['data']
+            
+            if result_type == 'success':
+                return result_data
+            else:
+                print(f"Error analyzing {zip_path}: {result_data[0]} - {result_data[1]}")
                 return False, None, None, None, 0
 
     def batch_analyze_zips(
@@ -340,12 +360,17 @@ class LoadResult:
         self.cache_key = cache_key
 
 
+class ImageLoaderSignals(QObject):
+    """Custom signals for image loading operations."""
+    image_loaded = Signal(object)  # Signal carrying LoadResult object
+
+
 def load_image_data_async(
     zip_path: str,
     member_name: str,
     max_load_size: int,
     target_size: Optional[Tuple[int, int]],
-    result_queue: queue.Queue,
+    signals: Optional[ImageLoaderSignals],
     cache: LRUCache,
     cache_key: tuple,
     zip_manager: ZipFileManager,
@@ -353,7 +378,7 @@ def load_image_data_async(
     force_reload: bool = False
 ):
     """
-    Asynchronously loads image data from a ZIP archive member.
+    Asynchronously loads image data from a ZIP archive member using Qt signals instead of queues.
     """
     if not force_reload:
         cached_image = cache.get(cache_key)
@@ -366,29 +391,46 @@ def load_image_data_async(
                         else Image.Resampling.LANCZOS
                     )
                     img_to_process.thumbnail(target_size, resampling_method)
-                    result_queue.put(LoadResult(success=True, data=img_to_process, cache_key=cache_key))
+                    result = LoadResult(success=True, data=img_to_process, cache_key=cache_key)
                 else:
                     # Return the cached image directly if no resizing needed
-                    result_queue.put(LoadResult(success=True, data=cached_image, cache_key=cache_key))
-                return
+                    result = LoadResult(success=True, data=cached_image, cache_key=cache_key)
+                
+                if signals is not None:
+                    signals.image_loaded.emit(result)
+                    return
+                else:
+                    return result
             except Exception as e:
                 print(f"Async Load Warning: Error processing cached image for {cache_key}: {e}")
 
     zf = zip_manager.get_zipfile(zip_path)
     if zf is None:
-        result_queue.put(LoadResult(success=False, error_message="Cannot open ZIP", cache_key=cache_key))
-        return
+        result = LoadResult(success=False, error_message="Cannot open ZIP", cache_key=cache_key)
+        if signals is not None:
+            signals.image_loaded.emit(result)
+            return
+        else:
+            return result
 
     try:
         member_info = zf.getinfo(member_name)
 
         if member_info.file_size == 0:
-            result_queue.put(LoadResult(success=False, error_message="Image file empty", cache_key=cache_key))
-            return
+            result = LoadResult(success=False, error_message="Image file empty", cache_key=cache_key)
+            if signals is not None:
+                signals.image_loaded.emit(result)
+                return
+            else:
+                return result
         if member_info.file_size > max_load_size:
             err_msg = f"Too large ({_format_size(member_info.file_size)} > {_format_size(max_load_size)})"
-            result_queue.put(LoadResult(success=False, error_message=err_msg, cache_key=cache_key))
-            return
+            result = LoadResult(success=False, error_message=err_msg, cache_key=cache_key)
+            if signals is not None:
+                signals.image_loaded.emit(result)
+                return
+            else:
+                return result
 
         image_data = zf.read(member_name)
         with io.BytesIO(image_data) as image_stream:
@@ -406,30 +448,49 @@ def load_image_data_async(
             )
             img_thumb = img.copy()
             img_thumb.thumbnail(target_size, resampling_method)
-            result_queue.put(LoadResult(success=True, data=img_thumb, cache_key=cache_key))
+            result = LoadResult(success=True, data=img_thumb, cache_key=cache_key)
         else:
-            result_queue.put(LoadResult(success=True, data=img, cache_key=cache_key))
+            result = LoadResult(success=True, data=img, cache_key=cache_key)
+        
+        if signals is not None:
+            signals.image_loaded.emit(result)
+            return
+        else:
+            return result
 
     except KeyError:
-        result_queue.put(LoadResult(success=False, error_message=f"Member '{member_name}' not found", cache_key=cache_key))
+        result = LoadResult(success=False, error_message=f"Member '{member_name}' not found", cache_key=cache_key)
+        if signals is not None:
+            signals.image_loaded.emit(result)
+            return
+        else:
+            return result
     except UnidentifiedImageError:
-        result_queue.put(LoadResult(success=False, error_message="Invalid image format", cache_key=cache_key))
+        result = LoadResult(success=False, error_message="Invalid image format", cache_key=cache_key)
+        if signals is not None:
+            signals.image_loaded.emit(result)
+            return
+        else:
+            return result
     except Image.DecompressionBombError:
-        result_queue.put(LoadResult(success=False, error_message="Decompression Bomb", cache_key=cache_key))
+        result = LoadResult(success=False, error_message="Decompression Bomb", cache_key=cache_key)
+        if signals is not None:
+            signals.image_loaded.emit(result)
+            return
+        else:
+            return result
     except MemoryError:
-        result_queue.put(LoadResult(success=False, error_message="Out of memory", cache_key=cache_key))
+        result = LoadResult(success=False, error_message="Out of memory", cache_key=cache_key)
+        if signals is not None:
+            signals.image_loaded.emit(result)
+            return
+        else:
+            return result
     except Exception as e:
         print(f"Async Load Error: Failed processing {cache_key}: {type(e).__name__} - {e}")
-        result_queue.put(LoadResult(success=False, error_message=f"Load error: {type(e).__name__}", cache_key=cache_key))
-
-
-def _format_size(size_bytes: int) -> str:
-    """Formats byte size into a human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024**2:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024**3:
-        return f"{size_bytes / 1024**2:.1f} MB"
-    else:
-        return f"{size_bytes / 1024**3:.1f} GB"
+        result = LoadResult(success=False, error_message=f"Load error: {type(e).__name__}", cache_key=cache_key)
+        if signals is not None:
+            signals.image_loaded.emit(result)
+            return
+        else:
+            return result

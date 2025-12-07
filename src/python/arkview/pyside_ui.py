@@ -4,7 +4,6 @@ PySide UI components for Arkview.
 
 import os
 import platform
-import queue
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 from PySide6.QtWidgets import (
@@ -12,15 +11,44 @@ from PySide6.QtWidgets import (
     QCheckBox, QPushButton, QGroupBox, QGridLayout, QScrollArea,
     QApplication, QMainWindow, QWidget, QSizePolicy
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QThread
+from PySide6.QtCore import Qt, Signal, QTimer, QThread, Slot, QObject
 from PySide6.QtGui import QPixmap, QPalette, QColor
 from PIL import Image
 import PIL.ImageQt
 
 from .core import (
     ZipScanner, ZipFileManager, LRUCache, load_image_data_async,
-    LoadResult, _format_size
+    LoadResult, _format_size, ImageLoaderSignals
 )
+
+
+class ImageViewerWorker(QObject):
+    """Worker object for handling image loading in a separate thread."""
+    imageLoaded = Signal(object)  # LoadResult
+    loadError = Signal(str)       # error message
+
+    def __init__(self):
+        super().__init__()
+        self.signals = ImageLoaderSignals()
+        self.signals.image_loaded.connect(self._on_image_loaded)
+        
+    @Slot(str, str, tuple, int, tuple, object, object, bool)
+    def load_image(self, zip_path: str, member_path: str, cache_key: tuple, 
+                   max_size: int, resize_params: tuple, cache, zip_manager, performance_mode: bool):
+        """Load an image from a ZIP file."""
+        try:
+            # Call the async loading function with signals for callback
+            load_image_data_async(
+                zip_path, member_path, max_size, resize_params,
+                self.signals, cache, cache_key, zip_manager, performance_mode
+            )
+        except Exception as e:
+            self.loadError.emit(str(e))
+            
+    @Slot(object)
+    def _on_image_loaded(self, result):
+        """Handle loaded image result."""
+        self.imageLoaded.emit(result)
 
 
 class SlideView(QFrame):
@@ -32,7 +60,6 @@ class SlideView(QFrame):
         zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]],
         app_settings: Dict[str, Any],
         cache: LRUCache,
-        thread_pool,
         zip_manager: ZipFileManager,
         config: Dict[str, Any],
         back_callback: Optional[Callable] = None
@@ -42,7 +69,6 @@ class SlideView(QFrame):
         self.zip_files = zip_files
         self.app_settings = app_settings
         self.cache = cache
-        self.thread_pool = thread_pool
         self.zip_manager = zip_manager
         self.config = config
         self.back_callback = back_callback
@@ -51,7 +77,14 @@ class SlideView(QFrame):
         self.current_members: Optional[List[str]] = None
         self.current_index: int = 0
         
-        self.result_queue: queue.Queue = queue.Queue()
+        # Setup threaded image loading
+        self.image_loader_thread = QThread()
+        self.image_loader_worker = ImageViewerWorker()
+        self.image_loader_worker.moveToThread(self.image_loader_thread)
+        self.image_loader_worker.imageLoaded.connect(self._on_image_loaded)
+        self.image_loader_worker.loadError.connect(self._on_load_error)
+        self.image_loader_thread.start()
+        
         self.current_pil_image: Optional[Image.Image] = None
         self.zoom_factor: float = 1.0
         self.fit_to_window: bool = True
@@ -208,35 +241,33 @@ class SlideView(QFrame):
         self.image_label.clear()
         self.image_label.setText("Loading...")
         
-        self.thread_pool.submit(
-            load_image_data_async,
+        # 使用工作线程加载图像
+        self.image_loader_worker.load_image.emit(
             self.current_zip_path,
             self.current_members[index],
+            cache_key,
             100 * 1024 * 1024,  # Max viewer load size
             None,  # No resizing for viewer
-            self.result_queue,
             self.cache,
-            cache_key,
             self.zip_manager,
             self.app_settings.get('performance_mode', False)
         )
+
+    @Slot(object)
+    def _on_image_loaded(self, result):
+        """Handle loaded image result."""
+        if result.success:
+            self.current_pil_image = result.data
+            self._update_display()
+        else:
+            self.image_label.setText(f"Error: {result.error_message}")
+        self._is_loading = False
         
-        self._check_load_result()
-        
-    def _check_load_result(self):
-        """Check for loaded image results."""
-        try:
-            result = self.result_queue.get_nowait()
-            if result.success:
-                self.current_pil_image = result.data
-                self._update_display()
-            else:
-                self.image_label.setText(f"Error: {result.error_message}")
-            self._is_loading = False
-        except queue.Empty:
-            # Queue is empty, check again later
-            if self._is_loading:
-                QTimer.singleShot(50, self._check_load_result)
+    @Slot(str)
+    def _on_load_error(self, error_msg):
+        """Handle image loading error."""
+        self.image_label.setText(f"Error: {error_msg}")
+        self._is_loading = False
                 
     def _update_display(self):
         """Update the image display."""
@@ -301,6 +332,14 @@ class SlideView(QFrame):
         super().resizeEvent(event)
         if self.current_pil_image and not self._is_loading:
             self._update_display()
+
+    def closeEvent(self, event):
+        """Handle window close event."""
+        # Clean up worker thread
+        if hasattr(self, 'image_loader_thread'):
+            self.image_loader_thread.quit()
+            self.image_loader_thread.wait()
+        event.accept()
 
 
 def format_datetime(timestamp: float) -> str:
@@ -443,8 +482,6 @@ class ImageViewerWindow(QDialog):
         initial_index: int,
         settings: Dict[str, Any],
         cache: LRUCache,
-        result_queue,
-        thread_pool,
         zip_manager: ZipFileManager
     ):
         super().__init__(parent)
@@ -454,8 +491,6 @@ class ImageViewerWindow(QDialog):
         self.current_index = initial_index
         self.settings = settings
         self.cache = cache
-        self.result_queue = result_queue
-        self.thread_pool = thread_pool
         self.zip_manager = zip_manager
 
         self.current_pil_image: Optional[Image.Image] = None
@@ -463,6 +498,14 @@ class ImageViewerWindow(QDialog):
         self.fit_to_window: bool = True
         self._is_loading: bool = False
         self._is_fullscreen: bool = False
+        
+        # Setup threaded image loading with Qt signals/slots
+        self.image_loader_thread = QThread()
+        self.image_loader_worker = ImageViewerWorker()
+        self.image_loader_worker.moveToThread(self.image_loader_thread)
+        self.image_loader_worker.imageLoaded.connect(self._on_image_loaded)
+        self.image_loader_worker.loadError.connect(self._on_load_error)
+        self.image_loader_thread.start()
 
         self.setWindowTitle(f"👁️ Viewer: {os.path.basename(zip_path)}")
         self.resize(900, 650)
@@ -634,36 +677,22 @@ class ImageViewerWindow(QDialog):
         self._is_loading = True
         cache_key = (self.zip_path, self.image_members[index])
 
-        self.thread_pool.submit(
-            load_image_data_async,
+        # Clear previous image
+        self.image_label.clear()
+        self.image_label.setText("Loading...")
+        self.status_label.setText("Loading...")
+
+        # 使用工作线程加载图像
+        self.image_loader_worker.load_image.emit(
             self.zip_path,
             self.image_members[index],
-            100 * 1024 * 1024,
-            None,  # No resizing for viewer
-            self.result_queue,
-            self.cache,
             cache_key,
+            100 * 1024 * 1024,  # Max viewer load size
+            None,  # No resizing for viewer
+            self.cache,
             self.zip_manager,
             self.settings.get('performance_mode', False)
         )
-
-        self._check_load_result()
-
-    def _check_load_result(self):
-        try:
-            result = self.result_queue.get_nowait()
-            if result.success:
-                self.current_pil_image = result.data
-                self.status_label.setText(f"Loaded: {os.path.basename(self.image_members[self.current_index])}")
-            else:
-                self.status_label.setText(f"Error: {result.error_message}")
-                self.current_pil_image = None
-            self._is_loading = False
-            self._update_display()
-        except queue.Empty:
-            # Queue is empty, check again later
-            if self._is_loading:
-                QTimer.singleShot(50, self._check_load_result)
 
     def _update_display(self):
         if self.current_pil_image is None:

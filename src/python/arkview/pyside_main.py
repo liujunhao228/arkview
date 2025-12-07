@@ -5,10 +5,6 @@ Main Arkview Application - PySide UI Implementation
 import os
 import sys
 import platform
-import queue
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -44,6 +40,147 @@ from .pyside_ui import (
 from .pyside_gallery import GalleryView
 
 
+class ImageLoaderSignals(QObject):
+    """为异步图像加载操作定义的信号集合"""
+    image_loaded = Signal(object)  # LoadResult
+
+class ThumbnailService(QObject):
+    """统一的缩略图加载服务，基于Qt信号槽机制"""
+    thumbnailLoaded = Signal(object, tuple)  # result, cache_key
+    load_thumbnail = Signal(str, str, tuple, int, tuple, bool)  # 信号：zip_path, member_path, cache_key, max_size, resize_params, performance_mode
+    
+    def __init__(self, cache, zip_manager, config):
+        super().__init__()
+        self.cache = cache
+        self.zip_manager = zip_manager
+        self.config = config
+        self.running = True
+        
+        # 创建专用的工作线程
+        self.worker_thread = QThread()
+        self.moveToThread(self.worker_thread)
+        self.worker_thread.start()
+        
+        # 连接信号到槽
+        self.load_thumbnail.connect(self._load_thumbnail_slot)
+        
+    @Slot(str, str, tuple, int, tuple, bool)
+    def _load_thumbnail_slot(self, zip_path: str, member_path: str, cache_key: tuple,
+                             max_size: int, resize_params: tuple, performance_mode: bool):
+        """在工作线程中加载缩略图的槽函数"""
+        if not self.running:
+            return
+            
+        try:
+            # Create signals instance for this load operation
+            signals = ImageLoaderSignals()
+            # 连接信号以转发结果
+            signals.image_loaded.connect(
+                lambda result: self.thumbnailLoaded.emit(result, cache_key),
+                Qt.QueuedConnection  # 确保在主线程中处理
+            )
+            
+            # 调用异步加载函数，传入我们创建的signals对象
+            load_image_data_async(
+                zip_path, member_path, max_size, resize_params,
+                signals, self.cache, cache_key, self.zip_manager, performance_mode
+            )
+        except Exception as e:
+            print(f"Error loading thumbnail: {e}")
+
+    def stop(self):
+        """停止服务并清理资源"""
+        self.running = False
+        # 停止工作线程
+        if hasattr(self, 'worker_thread'):
+            self.worker_thread.quit()
+            self.worker_thread.wait()
+
+
+class ScannerWorker(QObject):
+    """Worker object for handling directory scanning in a separate thread."""
+    scanCompleted = Signal(int, int)  # valid_count, total_processed
+    scanProgress = Signal(int, int)   # processed, total
+    scanError = Signal(object)        # exception
+    stopRequested = Signal()          # 请求停止信号
+    finished = Signal()               # 工作完成信号
+    
+    def __init__(self, directory: str, zip_scanner):
+        super().__init__()
+        self.directory = directory
+        self.zip_scanner = zip_scanner
+        self._stop_requested = False
+        
+        # 连接停止请求信号
+        self.stopRequested.connect(self._on_stop_requested)
+        
+    @Slot()
+    def scan_directory(self):
+        """Scan directory for ZIP files."""
+        try:
+            # 获取所有ZIP文件
+            zip_files = [str(p) for p in Path(self.directory).glob("**/*.zip")]
+            total_files = len(zip_files)
+
+            if total_files == 0:
+                self.scanCompleted.emit(0, 0)
+                self.finished.emit()
+                return
+
+            # 批量处理参数
+            batch_size = max(1, CONFIG["BATCH_SCAN_SIZE"])
+            ui_update_interval = max(1, CONFIG["BATCH_UPDATE_INTERVAL"])
+            
+            # 处理状态
+            pending_entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]] = []
+            processed = 0
+            valid_found = 0
+
+            def flush_pending():
+                """Flush pending entries."""
+                # This will be handled by the main thread through signals
+                pass
+
+            # 分批处理ZIP文件
+            for start in range(0, total_files, batch_size):
+                if self._stop_requested:
+                    break
+
+                batch_paths = zip_files[start:start + batch_size]
+                try:
+                    batch_results = self.zip_scanner.batch_analyze_zips(batch_paths, collect_members=False)
+                except Exception as e:
+                    self.scanError.emit(e)
+                    self.finished.emit()
+                    return
+
+                # 处理分析结果
+                for zip_path, is_valid, members, mod_time, file_size, image_count in batch_results:
+                    processed += 1
+                    if is_valid:
+                        # Send individual entry via signal instead of batching
+                        self.scanProgress.emit(processed, total_files)
+                        valid_found += 1
+
+                # 更新进度
+                if processed % ui_update_interval == 0 or processed >= total_files:
+                    self.scanProgress.emit(processed, total_files)
+
+            # 发送最终状态
+            self.scanCompleted.emit(valid_found, processed)
+            
+        except Exception as e:
+            self.scanError.emit(e)
+        finally:
+            # 确保总是发射finished信号
+            self.finished.emit()
+            
+    @Slot()
+    def _on_stop_requested(self):
+        """处理停止请求"""
+        self._stop_requested = True
+
+
 class ThumbnailLoader(QObject):
     """Dedicated QObject for handling thumbnail loading operations."""
     thumbnailLoaded = Signal(object, str, str)  # result, zip_path, member_name
@@ -75,16 +212,17 @@ class MainApp(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle(f"Aarkview {CONFIG['APP_VERSION']}")
+        self.setWindowTitle(f"Arkview {CONFIG['APP_VERSION']}")
         self.resize(CONFIG["WINDOW_SIZE"][0], CONFIG["WINDOW_SIZE"][1])
         self.setMinimumSize(600, 400)
 
         self.zip_scanner = ZipScanner()
         self.zip_manager = ZipFileManager()
         self.cache = LRUCache(CONFIG["CACHE_MAX_ITEMS_NORMAL"])
-        self.preview_queue: queue.Queue = queue.Queue()
-        self.thread_pool = ThreadPoolExecutor(max_workers=CONFIG["THREAD_POOL_WORKERS"])
 
+        # Create thumbnail service (without thread pool)
+        self.thumbnail_service = ThumbnailService(self.cache, self.zip_manager, CONFIG)
+        
         # Create thumbnail loader for dedicated thread operations
         self.thumbnail_loader = ThumbnailLoader()
         self.thumbnail_loader.thumbnailLoaded.connect(self.onThumbnailLoaded)
@@ -105,8 +243,7 @@ class MainApp(QMainWindow):
         self.current_preview_future = None
         self._loading_members: Set[str] = set()
 
-        self.scan_thread = None
-        self.scan_stop_event = threading.Event()
+        # 使用 Qt 的机制，已移除 threading.Event
 
         self.current_view = "explorer"  # "explorer", "gallery", or "slide"
         self.slide_view_context: Dict[str, Any] = {
@@ -132,6 +269,8 @@ class MainApp(QMainWindow):
         self.show_error_signal.connect(self._show_error)
         self.scan_progress.connect(self._on_scan_progress)
         self.scan_completed.connect(self._on_scan_completed)
+        # Connect thumbnail service signal for preview loading
+        self.thumbnail_service.thumbnailLoaded.connect(self.onPreviewLoaded)
         
         # Initialize flags
         self._zip_selection_connected = False
@@ -483,7 +622,6 @@ class MainApp(QMainWindow):
             self.zip_files,
             self.app_settings,
             self.cache,
-            self.thread_pool,
             self.zip_manager,
             CONFIG,
             self._ensure_members_loaded,
@@ -502,7 +640,6 @@ class MainApp(QMainWindow):
             self.zip_files,
             self.app_settings,
             self.cache,
-            self.thread_pool,
             self.zip_manager,
             CONFIG,
             self._switch_to_previous_view
@@ -709,22 +846,31 @@ class MainApp(QMainWindow):
         
         if self.current_view in view_frames:
             view_frames[self.current_view].show()
+            # Force refresh
+            view_frames[self.current_view].repaint()
 
     def _handle_post_switch_action(self):
         """Handle actions that need to occur after view switching."""
         # Special handling for gallery view
         if self.current_view == "gallery" and self.gallery_widget:
             self.gallery_widget.populate()
+            # Force refresh
+            self.gallery_widget.show()
+            self.gallery_widget.repaint()
             
         # Special handling for slide view
         elif self.current_view == "slide" and self.slide_widget:
             # Context should be set before calling this method
-            pass
+            self.slide_widget.show()
+            self.slide_widget.repaint()
 
     def _refresh_gallery(self):
         """Refresh gallery view if it's currently active."""
         if self.current_view == "gallery" and self.gallery_widget:
             self.gallery_widget.populate()
+            # Force refresh
+            self.gallery_widget.show()
+            self.gallery_widget.repaint()
 
     # ==================== ZIP文件处理相关方法 ====================
     
@@ -737,84 +883,31 @@ class MainApp(QMainWindow):
             return
 
         self.update_status.emit("Scanning...")
-        self.scan_stop_event.clear()
+        # self.scan_stop_event.clear()  # 移除对 threading.Event 的使用
         
-        # 在单独的线程中执行扫描操作
-        self.scan_thread = threading.Thread(
-            target=self._scan_directory_worker,
-            args=(directory,),
-            daemon=True
-        )
-        self.scan_thread.start()
+        # 创建工作线程
+        self.scanner_thread = QThread()
+        self.scanner_worker = ScannerWorker(directory, self.zip_scanner)
+        self.scanner_worker.moveToThread(self.scanner_thread)
+        
+        # 连接信号
+        self.scanner_thread.started.connect(self.scanner_worker.scan_directory)
+        self.scanner_worker.scanCompleted.connect(self._on_scan_completed)
+        self.scanner_worker.scanProgress.connect(self._on_scan_progress)
+        self.scanner_worker.scanError.connect(self._handle_scan_error)
+        
+        # 清理连接
+        self.scanner_worker.finished.connect(self.scanner_thread.quit)
+        self.scanner_worker.finished.connect(self.scanner_worker.deleteLater)
+        self.scanner_thread.finished.connect(self.scanner_thread.deleteLater)
+        
+        # 启动线程
+        self.scanner_thread.start()
 
     def _scan_directory_worker(self, directory: str):
         """扫描目录的工作线程"""
-        try:
-            # 获取所有ZIP文件
-            zip_files = [str(p) for p in Path(directory).glob("**/*.zip")]
-            total_files = len(zip_files)
-
-            if total_files == 0:
-                self.update_status.emit("No ZIP files found")
-                return
-
-            # 批量处理参数
-            batch_size = max(1, CONFIG["BATCH_SCAN_SIZE"])
-            ui_update_interval = max(1, CONFIG["BATCH_UPDATE_INTERVAL"])
-            
-            # 处理状态
-            pending_entries: List[Tuple[str, Optional[List[str]], Optional[float], Optional[int], Optional[int]]] = []
-            processed = 0
-            valid_found = 0
-
-            def flush_pending():
-                """刷新待处理的条目"""
-                if not pending_entries:
-                    return
-                batch = pending_entries.copy()
-                pending_entries.clear()
-                self.add_zip_entries_signal.emit(batch)
-
-            # 分批处理ZIP文件
-            for start in range(0, total_files, batch_size):
-                if self.scan_stop_event.is_set():
-                    break
-
-                batch_paths = zip_files[start:start + batch_size]
-                try:
-                    batch_results = self.zip_scanner.batch_analyze_zips(batch_paths, collect_members=False)
-                except Exception as e:
-                    self._handle_scan_error(e)
-                    return
-
-                # 处理分析结果
-                for zip_path, is_valid, members, mod_time, file_size, image_count in batch_results:
-                    processed += 1
-                    if is_valid:
-                        pending_entries.append((zip_path, members, mod_time, file_size, image_count))
-                        valid_found += 1
-
-                # 定期刷新待处理条目
-                if len(pending_entries) >= batch_size:
-                    flush_pending()
-
-                # 更新进度
-                if processed % ui_update_interval == 0 or processed >= total_files:
-                    self.scan_progress.emit(processed, total_files)
-
-            # 刷新剩余条目
-            flush_pending()
-
-            # 发送最终状态
-            final_message = (
-                "Scan canceled" if self.scan_stop_event.is_set()
-                else f"Found {valid_found} valid archives (of {processed} scanned)"
-            )
-            self.update_status.emit(final_message)
-            self.scan_completed.emit(valid_found, processed)
-            
-        except Exception as e:
-            self._handle_scan_error(e)
+        # 这个方法已经废弃，由 ScannerWorker 类替代
+        pass
 
     def _handle_scan_error(self, error: Exception):
         """处理扫描过程中的错误"""
@@ -853,7 +946,7 @@ class MainApp(QMainWindow):
         QMessageBox.warning(
             self,
             "Not Valid",
-            f"'{os.path.basename(zip_path)}' does not contain only images."
+            f"'{os.path.basename(zip_path)}' doesdoes not contain only images."
         )
 
     def _add_zip_entry(
@@ -884,7 +977,7 @@ class MainApp(QMainWindow):
         # 刷新画廊视图
         self._refresh_gallery()
 
-        # 管理选择事件连接
+        # �gle选择事件连接
         self._manage_zip_selection_connection()
 
     def _show_error(self, title: str, message: str):
@@ -958,6 +1051,24 @@ class MainApp(QMainWindow):
         if hasattr(self, 'status_label') and self.status_label is not None:
             self.status_label.setText(message)
 
+    @Slot(object, tuple)
+    def onPreviewLoaded(self, result: LoadResult, cache_key: tuple):
+        """Handle preview image loaded signal from thumbnail service."""
+        # Only process if this is the current preview request
+        if cache_key != self.current_preview_cache_key:
+            return
+            
+        # Reset future reference
+        self.current_preview_future = None
+        
+        # Update preview based on result
+        if result.success and result.data:
+            # Emit signal to update preview (thread-safe)
+            self.update_preview.emit((result.data, None))
+        else:
+            message = result.error_message or "Preview failed"
+            self.update_preview.emit((None, message))
+
     def _on_update_preview(self, result_tuple):
         """Update the preview image with aspect ratio scaling."""
         if not hasattr(self, 'preview_label') or not self.preview_label:
@@ -984,15 +1095,20 @@ class MainApp(QMainWindow):
                     Qt.SmoothTransformation
                 )
                 self.preview_label.setPixmap(scaled_pixmap)
+                # Make sure the label is visible and repaint
+                self.preview_label.show()
+                self.preview_label.repaint()
                 # No need to set text when displaying image
             except Exception as e:
                 error_text = f"Error converting image: {str(e)}"
                 self.preview_label.setText(error_text)
+                self.preview_label.show()
                 print(f"[ERROR] {error_text}")
         else:
             # Display appropriate error message
             error_text = f"Error: {error_msg}" if error_msg else "Preview not available"
             self.preview_label.setText(error_text)
+            self.preview_label.show()
 
     def _on_zip_selected(self):
         """Handle ZIP file selection."""
@@ -1108,7 +1224,8 @@ class MainApp(QMainWindow):
             finally:
                 self.members_loaded_signal.emit(zip_path, members)
 
-        self.thread_pool.submit(task)
+        # 使用 QTimer.singleShot 将任务放到单独的线程中执行
+        QTimer.singleShot(0, task)
 
     def _on_members_loaded(self, zip_path: str, members: Optional[List[str]]):
         """Handle members loaded signal (thread-safe)."""
@@ -1160,9 +1277,6 @@ class MainApp(QMainWindow):
         if self.current_preview_future and not self.current_preview_future.done():
             self.current_preview_future.cancel()
 
-        # Clear the preview queue
-        self._clear_preview_result_queue()
-
         # Update preview state
         self.current_preview_index = index
         self.current_preview_members = members
@@ -1181,29 +1295,15 @@ class MainApp(QMainWindow):
             else CONFIG["THUMBNAIL_SIZE"]
         )
 
-        self.current_preview_future = self.thread_pool.submit(
-            load_image_data_async,
+        # 使用缩略图服务加载预览图像
+        self.thumbnail_service.load_thumbnail.emit(
             zip_path,
             members[index],
+            (zip_path, members[index]),
             self.app_settings['max_thumbnail_size'],
             target_size,
-            self.preview_queue,
-            self.cache,
-            (zip_path, members[index]),
-            self.zip_manager,
             self.app_settings['performance_mode']
         )
-
-        # Start checking for results
-        self._check_preview_result()
-
-    def _clear_preview_result_queue(self):
-        """Clear all items from the preview result queue."""
-        try:
-            while True:
-                self.preview_queue.get_nowait()
-        except queue.Empty:
-            pass
 
     def _update_preview_ui_elements(self, index: int, total_count: int):
         """Update preview navigation UI elements."""
@@ -1214,70 +1314,27 @@ class MainApp(QMainWindow):
         self.preview_prev_button.setEnabled(index > 0)
         self.preview_next_button.setEnabled(index < total_count - 1)
 
+
     def _submit_preview_task(self, zip_path: str, members: List[str], index: int):
-        """Submit the preview loading task to the thread pool."""
+        """Submit the preview loading task using Qt signals/slots."""
         target_size = (
             CONFIG["PERFORMANCE_THUMBNAIL_SIZE"] if self.app_settings['performance_mode']
             else CONFIG["THUMBNAIL_SIZE"]
         )
-
-        self.current_preview_future = self.thread_pool.submit(
-            load_image_data_async,
-            zip_path,
-            members[index],
-            self.app_settings['max_thumbnail_size'],
-            target_size,
-            self.preview_queue,
-            self.cache,
-            (zip_path, members[index]),  # cache_key
-            self.zip_manager,
-            self.app_settings['performance_mode']
+        
+        cache_key = (zip_path, members[index])
+        max_size = self.app_settings['max_thumbnail_size']
+        performance_mode = self.app_settings['performance_mode']
+        
+        # 使用thumbnail_service发送加载缩略图的信号
+        self.thumbnail_service.load_thumbnail.emit(
+            zip_path, 
+            members[index], 
+            cache_key, 
+            max_size, 
+            target_size, 
+            performance_mode
         )
-
-    def _submit_preview_task(self, zip_path: str, members: List[str], index: int):
-        """Submit the preview loading task to the thread pool."""
-        target_size = (
-            CONFIG["PERFORMANCE_THUMBNAIL_SIZE"] if self.app_settings['performance_mode']
-            else CONFIG["THUMBNAIL_SIZE"]
-        )
-
-        self.current_preview_future = self.thread_pool.submit(
-            load_image_data_async,
-            zip_path,
-            members[index],
-            self.app_settings['max_thumbnail_size'],
-            target_size,
-            self.preview_queue,
-            self.cache,
-            (zip_path, members[index]),  # cache_key
-            self.zip_manager,
-            self.app_settings['performance_mode']
-        )
-
-    def _check_preview_result(self):
-        """Check if preview image is ready."""
-        expected_key = getattr(self, 'current_preview_cache_key', None)
-        if expected_key is None:
-            return
-
-        try:
-            while True:
-                result = self.preview_queue.get_nowait()
-                if result.cache_key != expected_key:
-                    continue
-
-                if result.success and result.data:
-                    # Emit signal to update preview (thread-safe)
-                    self.update_preview.emit((result.data, None))
-                else:
-                    message = result.error_message or "Preview failed"
-                    self.update_preview.emit((None, message))
-                self.current_preview_future = None
-                return
-        except queue.Empty:
-            if self.current_preview_future and not self.current_preview_future.done():
-                # Check again after 20ms
-                QTimer.singleShot(20, self._check_preview_result)
 
     def _reset_preview(self, message: str = "Select a ZIP file"):
         """Reset the preview panel and clear any ongoing operations."""
@@ -1438,13 +1495,14 @@ BSD-2-Clause License"""
         # Add result to gallery queue if gallery view exists and is active
         if self.gallery_widget and self.current_view == "gallery":
             # The gallery widget expects results to be put in its queue for processing
-            # Create a result object with the expected structure
+            # Create a cache key that matches what the gallery expects
             try:
                 # Create a cache key that matches what the gallery expects
                 cache_key = (zip_path, member_name)
                 if hasattr(result, 'cache_key'):
                     result.cache_key = cache_key
-                self.gallery_widget.gallery_queue.put(result)
+                # 直接调用处理方法而不是使用队列
+                self.gallery_widget._on_thumbnail_loaded(result, cache_key)
             except Exception:
                 # Fallback: just update the gallery
                 pass
@@ -1456,23 +1514,47 @@ BSD-2-Clause License"""
 
     def closeEvent(self, event):
         """Handle application closing with proper resource cleanup."""
-        # Signal scan thread to stop
-        self.scan_stop_event.set()
-        
+        # 使用 Qt 信号请求停止扫描
+        if hasattr(self, 'scanner_worker') and self.scanner_worker:
+            try:
+                self.scanner_worker.stopRequested.emit()
+            except RuntimeError as e:
+                # Object has been deleted - ignore
+                pass
+            
         # Close all zip file handles
         self.zip_manager.close_all()
         
         # Stop thumbnail loader thread
         if hasattr(self, 'thumbnail_loader') and self.thumbnail_loader:
             self.thumbnail_loader.stop()
+            
+        # Stop the thumbnail service
+        if hasattr(self, 'thumbnail_service') and self.thumbnail_service:
+            self.thumbnail_service.stop()
+            
+        # 移除对ThreadPoolExecutor的shutdown调用，因为现在由ThumbnailService内部管理
         
-        # Shutdown thread pool gracefully
-        if hasattr(self, 'thread_pool'):
-            self.thread_pool.shutdown(wait=True)
+        # Stop the scanner thread if it exists
+        if hasattr(self, 'scanner_thread') and self.scanner_thread:
+            self.scanner_thread.quit()
+            self.scanner_thread.wait()
+            
+        # Stop the image loader thread in gallery view
+        if hasattr(self, 'gallery_widget') and self.gallery_widget:
+            try:
+                self.gallery_widget._cleanup_worker()
+            except Exception as e:
+                # Ignore errors during cleanup
+                pass
         
         # Clean up slide widget
         if hasattr(self, 'slide_widget') and self.slide_widget:
-            self.slide_widget.cleanup()
+            try:
+                self.slide_widget.cleanup()
+            except Exception as e:
+                # Ignore errors during cleanup
+                pass
         
         # Accept the close event
         event.accept()
@@ -1496,6 +1578,29 @@ BSD-2-Clause License"""
                 self.preview_label.setPixmap(scaled_pixmap)
             except Exception as e:
                 print(f"Error rescaling preview image: {e}")
+
+    def _submit_members_task(self, zip_path: str):
+        """Submit the members loading task using Qt signals/slots."""
+        if zip_path in self._loading_members:
+            return
+            
+        self._loading_members.add(zip_path)
+        
+        def task():
+            try:
+                members = self._ensure_members_loaded(zip_path)
+            except Exception as e:
+                # Emit error signal if loading fails
+                self.show_error_signal.emit(
+                    "Error",
+                    f"Failed to load archive contents for '{Path(zip_path).name}': {e}"
+                )
+                members = None
+            finally:
+                self.members_loaded_signal.emit(zip_path, members)
+                
+        # 使用 QTimer.singleShot 将任务放到单独的线程中执行
+        QTimer.singleShot(0, task)
 
 
 def main():
