@@ -109,16 +109,14 @@ class ZipServiceInterface(ABC):
 
 # 初始化services模块
 
-from .cache_service import CacheService as UnifiedCacheService
-from ..core.unified_cache import UnifiedCacheService as MemoryAwareCacheService
+from .simple_cache_service import SimpleCacheService
 from .config_service import ConfigService
 from .image_service import ImageService
 from .thumbnail_service import ThumbnailService
 from .zip_service import ZipService
 
 __all__ = [
-    'UnifiedCacheService',
-    'MemoryAwareCacheService',
+    'SimpleCacheService',
     'ConfigService',
     'ImageService',
     'ThumbnailService',

@@ -58,7 +58,7 @@ class ImageService:
                     # Fall through to reload if processing fails
 
             # Access ZIP file
-            zf = self.zip_manager.get_zipfile(zip_path)
+            zf = self.zip_manager.get_zip(zip_path)
             if zf is None:
                 return LoadResult(success=False, error_message="Cannot open ZIP", cache_key=cache_key)
 

@@ -8,19 +8,18 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtWidgets import (
-    QFrame, QScrollArea, QGridLayout, QLabel, QSizePolicy,
-    QVBoxLayout, QHBoxLayout, QWidget
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
+    QLabel, QScrollArea, QFrame, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap, QCursor, QKeyEvent
-from PIL import Image
-import PIL.ImageQt
+from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtGui import QPixmap, QKeyEvent
 
-from ..services.cache_service import CacheService
+from ..services import SimpleCacheService as CacheService
+from ..core.models import ImageExtensions
 from ..core.file_manager import ZipFileManager
-from ..core.models import LoadResult
-from ..core import _format_size
-from ..core.unified_cache import UnifiedCacheService
+# 从Rust部分导入format_size函数
+from ..arkview_core import format_size
+from PIL import Image, ImageQt
 
 
 class GalleryCard(QFrame):
@@ -93,7 +92,7 @@ class GalleryCard(QFrame):
         badge_row = QHBoxLayout()
         badge_row.setSpacing(6)
         self.images_badge = self._create_badge(f"{self.image_count} images", accent=True)
-        self.size_badge = self._create_badge(_format_size(self.file_size), accent=False)
+        self.size_badge = self._create_badge(format_size(self.file_size), accent=False)
         badge_row.addWidget(self.images_badge)
         badge_row.addWidget(self.size_badge)
         badge_row.addStretch()
@@ -230,7 +229,7 @@ class GalleryView(QFrame):
         parent: QWidget,
         zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]],
         app_settings: Dict[str, Any],
-        cache_service: UnifiedCacheService,  # 修改参数类型
+        cache_service: CacheService,  # 更新为正确的类型注解
         zip_manager: ZipFileManager,
         config: Dict[str, Any],
         ensure_members_loaded_func: Callable[[str], Optional[List[str]]],
@@ -504,7 +503,7 @@ class GalleryView(QFrame):
         cached_image = self.cache_service.get(cache_key)
         if cached_image is not None:
             try:
-                qimage = PIL.ImageQt.ImageQt(cached_image)
+                qimage = ImageQt.ImageQt(cached_image)
                 pixmap = QPixmap.fromImage(qimage)
                 card.set_thumbnail(pixmap)
                 return
@@ -526,7 +525,7 @@ class GalleryView(QFrame):
             img.thumbnail((210, 210), Image.Resampling.LANCZOS)
             self.cache_service.put(cache_key, img)
 
-            qimage = PIL.ImageQt.ImageQt(img)
+            qimage = ImageQt.ImageQt(img)
             pixmap = QPixmap.fromImage(qimage)
             card.set_thumbnail(pixmap)
         except Exception as e:
@@ -542,17 +541,29 @@ class GalleryView(QFrame):
         elif key == Qt.Key_Return or key == Qt.Key_Enter:
             self._open_selected()
         elif key in (Qt.Key_Left, Qt.Key_A):
-            self._navigate_card(-1)
+            if event.modifiers() == Qt.ControlModifier:
+                self._navigate_card(-1)
+            else:
+                self._navigate_card_2d(0, -1)
         elif key in (Qt.Key_Right, Qt.Key_D):
-            self._navigate_card(1)
+            if event.modifiers() == Qt.ControlModifier:
+                self._navigate_card(1)
+            else:
+                self._navigate_card_2d(0, 1)
         elif key in (Qt.Key_Up, Qt.Key_W):
-            self._navigate_card(-self.current_columns)
+            self._navigate_card_2d(-1, 0)
         elif key in (Qt.Key_Down, Qt.Key_S):
-            self._navigate_card(self.current_columns)
+            self._navigate_card_2d(1, 0)
         elif key == Qt.Key_Home:
-            self._navigate_to_first()
+            if event.modifiers() == Qt.ControlModifier:
+                self._navigate_to_first()
+            else:
+                super().keyPressEvent(event)
         elif key == Qt.Key_End:
-            self._navigate_to_last()
+            if event.modifiers() == Qt.ControlModifier:
+                self._navigate_to_last()
+            else:
+                super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
 
@@ -561,3 +572,108 @@ class GalleryView(QFrame):
         if self.selected_card:
             self.selected_card.set_selected(False)
             self.selected_card = None
+
+    def _navigate_card(self, delta: int):
+        """Navigate to another card relative to the currently selected one."""
+        if not self.cards:
+            return
+            
+        if self.selected_card is None:
+            # 如果没有选中的卡片，则选择第一张
+            target_index = 0 if delta >= 0 else len(self.cards) - 1
+        else:
+            # 计算目标卡片索引
+            current_index = self.cards.index(self.selected_card)
+            target_index = current_index + delta
+            
+        # 确保索引在有效范围内
+        target_index = max(0, min(len(self.cards) - 1, target_index))
+        
+        # 选择目标卡片
+        target_card = self.cards[target_index]
+        self._on_card_clicked(target_card)
+        
+        # 确保选中的卡片可见
+        self._ensure_card_visible(target_card)
+
+    def _navigate_card_2d(self, row_delta: int, col_delta: int):
+        """
+        Navigate in 2D grid space (for arrow key navigation).
+        This provides a more intuitive navigation experience.
+        """
+        if not self.cards or not self.current_columns:
+            return
+            
+        if self.selected_card is None:
+            # 如果没有选中的卡片，则选择第一张
+            target_index = 0
+        else:
+            # 计算当前卡片的行列位置
+            current_index = self.cards.index(self.selected_card)
+            current_row = current_index // self.current_columns
+            current_col = current_index % self.current_columns
+            
+            # 计算目标行列位置
+            target_row = current_row + row_delta
+            target_col = current_col + col_delta
+            
+            # 计算目标索引
+            target_index = target_row * self.current_columns + target_col
+            
+        # 确保索引在有效范围内
+        target_index = max(0, min(len(self.cards) - 1, target_index))
+        
+        # 选择目标卡片
+        target_card = self.cards[target_index]
+        self._on_card_clicked(target_card)
+        
+        # 确保选中的卡片可见
+        self._ensure_card_visible(target_card)
+
+    def _navigate_to_first(self):
+        """Navigate to the first card."""
+        if self.cards:
+            target_card = self.cards[0]
+            self._on_card_clicked(target_card)
+            self._ensure_card_visible(target_card)
+
+    def _navigate_to_last(self):
+        """Navigate to the last card."""
+        if self.cards:
+            target_card = self.cards[-1]
+            self._on_card_clicked(target_card)
+            self._ensure_card_visible(target_card)
+
+    def _ensure_card_visible(self, card: GalleryCard):
+        """Ensure that a card is visible in the scroll area."""
+        # 获取卡片在网格布局中的位置
+        for i in range(self.grid_layout.count()):
+            widget = self.grid_layout.itemAt(i).widget()
+            if widget == card:
+                # 计算卡片的位置
+                card_global_pos = card.mapToGlobal(card.rect().topLeft())
+                scroll_area_global_pos = self.scroll_area.mapToGlobal(self.scroll_area.rect().topLeft())
+                
+                # 计算卡片相对于滚动区域的位置
+                card_relative_pos = card_global_pos - scroll_area_global_pos
+                card_top = card_relative_pos.y()
+                card_bottom = card_top + card.height()
+                
+                # 获取滚动区域的信息
+                scroll_bar = self.scroll_area.verticalScrollBar()
+                viewport_height = self.scroll_area.viewport().height()
+                
+                # 检查卡片是否在可视区域内
+                if card_top < 0:
+                    # 卡片在可视区域上方，向上滚动
+                    scroll_bar.setValue(scroll_bar.value() + card_top - 10)
+                elif card_bottom > viewport_height:
+                    # 卡片在可视区域下方，向下滚动
+                    scroll_bar.setValue(scroll_bar.value() + card_bottom - viewport_height + 10)
+                    
+                break
+
+    def _open_selected(self):
+        """Open the currently selected card."""
+        if self.selected_card:
+            self._on_card_double_clicked(self.selected_card)

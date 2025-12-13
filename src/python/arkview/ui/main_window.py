@@ -36,7 +36,7 @@ from ..services.zip_service import ZipService
 from ..services.image_service import ImageService
 from ..services.thumbnail_service import ThumbnailService
 from ..services.config_service import ConfigService
-from ..services.cache_service import CacheService
+from ..services import SimpleCacheService as CacheService
 
 # Import UI components
 from ..ui.dialogs import SettingsDialog
@@ -44,7 +44,9 @@ from ..ui.viewer_window import ImageViewerWindow
 from ..ui.gallery_view import GalleryView
 
 # Import core models (these don't contain business logic)
-from ..core.models import LoadResult, _format_size
+from ..core.models import LoadResult
+from ..core.file_manager import ZipFileManager
+from ..arkview_core import format_size
 
 
 class MainWindow(QMainWindow):
@@ -69,10 +71,11 @@ class MainWindow(QMainWindow):
         """Initialize all required services."""
         # Initialize services
         self.cache_service = CacheService(capacity=CONFIG["CACHE_MAX_ITEMS_NORMAL"])
+        self.zip_manager = ZipFileManager()
 
         # Initialize other services
         self.zip_service = ZipService()
-        self.image_service = ImageService(self.cache_service)
+        self.image_service = ImageService(self.cache_service, self.zip_manager)
         self.thumbnail_service = ThumbnailService(self.cache_service, CONFIG)
         self.config_service = ConfigService()
 

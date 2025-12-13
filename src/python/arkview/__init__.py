@@ -1,60 +1,53 @@
 """
-Arkview package initialization.
+Arkview - A high-performance image browser for ZIP archives.
 """
 
-# Import core components
-from .core.models import LoadResult
-from .core.file_manager import ZipFileManager
-from .core import LegacyZipFileManager
+# Version info
+from .config import APP_VERSION
 
-# Import services
-from .services.cache_service import (
-    UnifiedCacheService,
-    MemoryAwareCacheService
+# Core components
+from .core import (
+    SimpleLRUCache,
+    ZipFileManager,
+    ZipFileInfo
 )
-from .services.config_service import ConfigService
-from .services.image_service import ImageService
-from .services.thumbnail_service import ThumbnailService
-from .services.zip_service import ZipService
 
-# Import UI components
+# Services
+from .services import (
+    SimpleCacheService,
+    ConfigService,
+    ImageService,
+    ThumbnailService,
+    ZipService
+)
+
+# UI Components
 from .ui import (
     MainWindow,
     ImageViewerWindow,
     GalleryView
 )
 
-# Import configuration
-from .config import CONFIG
-
-# Backward compatibility imports
-try:
-    from .core import ZipScanner
-except ImportError:
-    # In case rust extension is not available
-    from .services.zip_service import ZipService
-    ZipScanner = ZipService
+__version__ = APP_VERSION
 
 __all__ = [
+    # Version
+    "__version__",
+    
     # Core components
-    "LoadResult",
+    "SimpleLRUCache",
     "ZipFileManager",
-    "LegacyZipFileManager",
-    "ZipScanner",
+    "ZipFileInfo",
     
     # Services
-    "UnifiedCacheService",
-    "MemoryAwareCacheService",
+    "SimpleCacheService",
     "ConfigService",
     "ImageService",
     "ThumbnailService",
     "ZipService",
     
-    # UI components
+    # UI Components
     "MainWindow",
     "ImageViewerWindow",
-    "GalleryView",
-    
-    # Configuration
-    "CONFIG"
+    "GalleryView"
 ]
