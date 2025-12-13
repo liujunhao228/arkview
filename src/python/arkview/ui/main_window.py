@@ -37,6 +37,10 @@ from ..services.image_service import ImageService
 from ..services.thumbnail_service import ThumbnailService
 from ..services.config_service import ConfigService
 from ..services import SimpleCacheService as CacheService
+from ..services.navigation_service import NavigationService
+from ..services.playlist_service import PlaylistService
+from ..services.slideshow_service import SlideshowService
+from ..core.models import ZipFileInfo
 
 # Import UI components
 from ..ui.dialogs import SettingsDialog
@@ -78,6 +82,10 @@ class MainWindow(QMainWindow):
         self.image_service = ImageService(self.cache_service, self.zip_manager)
         self.thumbnail_service = ThumbnailService(self.cache_service, CONFIG)
         self.config_service = ConfigService()
+        self.navigation_service = NavigationService()
+        self.playlist_service = PlaylistService()
+        # 初始化新的服务并传入zip_manager
+        self.slideshow_service = SlideshowService(self.zip_manager)
 
         # Connect thumbnail service signals
         self.thumbnail_service.thumbnailLoaded.connect(self._on_thumbnail_loaded)
@@ -375,8 +383,30 @@ class MainWindow(QMainWindow):
         
     def _open_viewer(self, zip_path: str, members: List[str], index: int):
         """Open the image viewer."""
+        # Update playlist service with all loaded archives
+        all_archives = []
+        for path, (archive_members, mod_time, file_size, image_count) in self.zip_files.items():
+            if archive_members is not None:  # Only include archives with loaded members
+                all_archives.append(ZipFileInfo(
+                    path=path,
+                    is_valid=True,
+                    members=archive_members,
+                    mod_time=mod_time,
+                    file_size=file_size,
+                    image_count=image_count
+                ))
+        
+        # Sort archives by path for consistent ordering
+        all_archives.sort(key=lambda x: x.path)
+        print(f"DEBUG: Setting {len(all_archives)} archives in playlist service")  # 添加调试输出
+        self.playlist_service.create_from_archives(all_archives)
+        
+        # Update navigation service with ALL archives, not just the current one
+        self.navigation_service.set_archives(all_archives)
+        
         viewer = ImageViewerWindow(
             image_service=self.image_service,
+            navigation_service=self.navigation_service,
             parent=self
         )
         viewer.populate(zip_path, members, index)

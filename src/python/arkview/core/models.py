@@ -29,6 +29,23 @@ class ZipFileInfo:
         return parse_human_size(self.file_size)
 
 
+class LightweightPlaylistEntry:
+    """A lightweight version of playlist entry that doesn't store full objects."""
+    
+    def __init__(self, archive_path: str, image_member: str):
+        self.archive_path = archive_path
+        self.image_member = image_member
+    
+    @classmethod
+    def from_zip_file_info(cls, zip_info: ZipFileInfo, image_member: str) -> 'LightweightPlaylistEntry':
+        """Create a lightweight entry from ZipFileInfo."""
+        return cls(zip_info.path, image_member)
+    
+    def to_tuple(self) -> Tuple[str, str]:
+        """Convert to tuple representation."""
+        return (self.archive_path, self.image_member)
+
+
 @dataclass
 class LoadResult:
     """Result of an asynchronous image load operation."""

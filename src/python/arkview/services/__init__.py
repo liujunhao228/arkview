@@ -114,11 +114,21 @@ from .config_service import ConfigService
 from .image_service import ImageService
 from .thumbnail_service import ThumbnailService
 from .zip_service import ZipService
+from .simple_cache_service import SimpleCacheService
+from .navigation_service import NavigationService
+from .playlist_service import PlaylistService, OptimizedPlaylistService
+from .simple_cache_service import SimpleCacheService
+# 添加新的服务
+from .slideshow_service import SlideshowService
 
 __all__ = [
-    'SimpleCacheService',
     'ConfigService',
-    'ImageService',
+    'ImageService', 
     'ThumbnailService',
-    'ZipService'
+    'ZipService',
+    'SimpleCacheService',
+    'NavigationService',
+    'PlaylistService',
+    'OptimizedPlaylistService',
+    'SlideshowService'
 ]
