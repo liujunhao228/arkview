@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, Signal, Slot, QThread, Qt, QMutex, QMutexLoc
 
 from ..core.models import LoadResult
 from ..core.file_manager import ZipFileManager
+from ..core.cache_keys import make_zip_cover_thumbnail_key
 try:
     from ..core import arkview_core
     RUST_AVAILABLE = True
@@ -25,6 +26,7 @@ except ImportError:
 class ThumbnailWorker(QObject):
     """Worker object for handling thumbnail loading in a separate thread."""
     thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
+    load_thumbnail = Signal(str, str, tuple, int, tuple, bool)  # 信号定义
     finished = Signal()  # Signal emitted when worker finishes
     
     def __init__(self, cache_service, config):
@@ -34,11 +36,11 @@ class ThumbnailWorker(QObject):
         self.running = True
         from ..services.image_service import ImageService
         self.image_service = ImageService(cache_service, ZipFileManager())
-
+        
     @Slot(str, str, tuple, int, tuple, bool)
-    def load_thumbnail(self, zip_path: str, member_path: str, cache_key: tuple,
-                      max_size: int, resize_params: tuple, performance_mode: bool):
-        """Load a thumbnail in a worker thread."""
+    def process_thumbnail(self, zip_path: str, member_path: str, cache_key: tuple,
+                         max_size: int, resize_params: tuple, performance_mode: bool):
+        """Process a thumbnail in a worker thread."""
         if not self.running:
             return
             
@@ -52,11 +54,13 @@ class ThumbnailWorker(QObject):
             # Emit the result
             self.thumbnailLoaded.emit(result, cache_key)
         except Exception as e:
-            print(f"Error loading thumbnail: {e}")
+            error_msg = f"Thumbnail load error: {str(e)}"
+            print(f"Error loading thumbnail for {zip_path}[{member_path}]: {error_msg}")  # 添加日志输出
+            traceback.print_exc()  # 打印完整的堆栈跟踪
             # Emit error result
             error_result = LoadResult(
                 success=False, 
-                error_message=f"Thumbnail load error: {str(e)}", 
+                error_message=error_msg, 
                 cache_key=cache_key
             )
             self.thumbnailLoaded.emit(error_result, cache_key)
@@ -66,52 +70,87 @@ class ThumbnailWorker(QObject):
 
 
 class ThumbnailService(QObject):
-    """Service for handling thumbnail loading and caching operations."""
-
-    # Signals for async operations
-    thumbnailRequested = Signal(str, str, object, int, object, bool)
+    """Service for managing thumbnail loading and caching."""
+    
+    # Signal emitted when a thumbnail is loaded
     thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
-    batchProcessed = Signal(list)
-    errorOccurred = Signal(str, str, str)  # zip_path, member_name, error_msg
     
     def __init__(self, cache_service, config):
         super().__init__()
         self.cache_service = cache_service
         self.config = config
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        self._mutex = QMutex()
-        self.zip_manager = ZipFileManager()
-        if RUST_AVAILABLE:
-            self.image_processor = ImageProcessorRust()
-        else:
-            self.image_processor = None
+        self.max_load_size = int(config.get("MAX_THUMBNAIL_LOAD_SIZE", 10 * 1024 * 1024))
         
-        # Create worker thread and worker
-        self.worker_thread = QThread()
+        # Worker thread and object
+        self.thread = QThread()
         self.worker = ThumbnailWorker(cache_service, config)
-        
-        # Move worker to thread
-        self.worker.moveToThread(self.worker_thread)
+        self.worker.moveToThread(self.thread)
         
         # Connect signals
-        self.thumbnailRequested.connect(self.worker.load_thumbnail, Qt.QueuedConnection)
-        self.worker.thumbnailLoaded.connect(self.thumbnailLoaded)
-
-        # Start the worker thread
-        self.worker_thread.start()
-
+        self.worker.thumbnailLoaded.connect(self._on_thumbnail_loaded)
+        self.worker.load_thumbnail.connect(self.worker.process_thumbnail)  # 连接信号到处理方法
+        
+        # Start the thread
+        self.thread.start()
+        
     def request_thumbnail(self, zip_path: str, member_path: str, cache_key: tuple,
                          max_size: int, resize_params: tuple, performance_mode: bool):
         """Request loading of a thumbnail."""
-        self.thumbnailRequested.emit(
-            zip_path, member_path, cache_key, max_size, resize_params, performance_mode
-        )
-
-    # No need for _on_thumbnail_loaded method as we connect worker directly to thumbnailLoaded signal
-
+        if self.thread.isRunning():
+            # Call the worker's load_thumbnail method via signal
+            self.worker.load_thumbnail.emit(
+                zip_path, member_path, cache_key, max_size, resize_params, performance_mode
+            )
+            
+    def request_cover_thumbnail(self, zip_path: str, thumb_size: tuple, 
+                              priority: bool, performance_mode: bool):
+        """Request loading of a ZIP file cover thumbnail."""
+        cover_key = make_zip_cover_thumbnail_key(zip_path, thumb_size)
+        
+        # Check if already in cache
+        cached_image = self.cache_service.get(cover_key)
+        if cached_image is not None:
+            # Emit signal immediately with cached image
+            result = LoadResult(success=True, data=cached_image, error_message=None)
+            self.thumbnailLoaded.emit(result, cover_key)
+            return
+            
+        # Find the first image in the ZIP file
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                first_image = None
+                from ..core.models import ImageExtensions
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    if not ImageExtensions.is_image_file(info.filename):
+                        continue
+                    if info.file_size <= 0:
+                        continue
+                    if info.file_size > self.max_load_size:
+                        raise ValueError(f"Cover image too large: {info.file_size} bytes")
+                    first_image = info.filename
+                    break
+                    
+                if not first_image:
+                    raise ValueError("No images found")
+                    
+                # Request thumbnail loading
+                self.request_thumbnail(
+                    zip_path, first_image, cover_key,
+                    self.max_load_size, thumb_size, performance_mode
+                )
+        except Exception as e:
+            print(f"Error processing cover thumbnail for {zip_path}: {str(e)}")
+            error_result = LoadResult(success=False, data=None, error_message=str(e))
+            self.thumbnailLoaded.emit(error_result, cover_key)
+            
+    def _on_thumbnail_loaded(self, result, cache_key):
+        """Handle thumbnail loaded event."""
+        self.thumbnailLoaded.emit(result, cache_key)
+        
     def stop_service(self):
         """Stop the thumbnail service and cleanup resources."""
         self.worker.running = False
-        if self.worker_thread.isRunning():
-            self.worker_thread.quit()
-            self.worker_thread.wait()
+        self.thread.quit()
+        self.thread.wait()

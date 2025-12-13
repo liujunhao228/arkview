@@ -18,13 +18,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QSize, QTimer, Signal, Slot
 from PySide6.QtGui import QPixmap, QKeyEvent
 
-from ..core.cache_keys import make_zip_cover_thumbnail_key
-from ..services import SimpleCacheService as CacheService
-from ..core.models import ImageExtensions
-from ..core.file_manager import ZipFileManager
 # 从Rust部分导入format_size函数
 from ..arkview_core import format_size
-from PIL import Image, ImageQt
+from PIL import ImageQt
 
 
 class GalleryCard(QFrame):
@@ -197,6 +193,9 @@ class GalleryCard(QFrame):
         self._set_message("⏳", "Loading preview…", "loading")
 
     def show_error_state(self, text: str = "Preview failed"):
+        # 限制错误文本长度以避免界面混乱
+        if len(text) > 100:
+            text = text[:97] + "..."
         self._set_message("⚠️", text, "error")
 
     def show_empty_state(self):
@@ -236,8 +235,7 @@ class GalleryView(QFrame):
         parent: QWidget,
         zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]],
         app_settings: Dict[str, Any],
-        cache_service: CacheService,  # 更新为正确的类型注解
-        zip_manager: ZipFileManager,
+        thumbnail_service,  # ThumbnailService
         config: Dict[str, Any],
         ensure_members_loaded_func: Callable[[str], Optional[List[str]]],
         on_selection_changed: Callable[[str, List[str], int], None],
@@ -247,8 +245,7 @@ class GalleryView(QFrame):
 
         self.zip_files = zip_files
         self.app_settings = app_settings
-        self.cache_service = cache_service  # 修改属性名称
-        self.zip_manager = zip_manager
+        self.thumbnail_service = thumbnail_service
         self.config = config
         self.ensure_members_loaded = ensure_members_loaded_func
         self.on_selection_changed = on_selection_changed
@@ -259,21 +256,15 @@ class GalleryView(QFrame):
         self.selected_card: Optional[GalleryCard] = None
         self.card_mapping: Dict[str, GalleryCard] = {}
         self.current_columns = 4
+        
+        # Thumbnail loading state
+        self._cover_thumb_queue = deque()
+        self._cover_thumb_pending = set()
+        self._cover_thumb_inflight = set()
 
         # Scrolling state
         self.scroll_position = 0
         self.visible_cards = set()
-
-        # Cover thumbnail loader (prioritized for smooth scrolling)
-        self._cover_thumb_size = tuple(self.config.get("GALLERY_THUMB_SIZE", (220, 220)))
-        self._cover_thumb_max_load_size = int(self.config.get("MAX_THUMBNAIL_LOAD_SIZE", 10 * 1024 * 1024))
-        self._cover_thumb_queue = deque()
-        self._cover_thumb_pending = set()
-        self._cover_thumb_inflight = set()
-        performance_mode = bool(self.app_settings.get("performance_mode", False))
-        self._cover_thumb_max_inflight = 2 if performance_mode else 3
-        self._cover_thumb_executor = ThreadPoolExecutor(max_workers=self._cover_thumb_max_inflight)
-        self.coverThumbnailJobFinished.connect(self._on_cover_thumbnail_job_finished)
 
         # Enable keyboard focus
         self.setFocusPolicy(Qt.StrongFocus)
@@ -281,6 +272,9 @@ class GalleryView(QFrame):
         # Setup UI
         self._setup_ui()
         self.populate()
+        
+        # Connect thumbnail service signal
+        self.thumbnail_service.thumbnailLoaded.connect(self._on_thumbnail_loaded)
         
     def _setup_ui(self):
         """Setup the gallery view UI."""
@@ -385,17 +379,33 @@ class GalleryView(QFrame):
         self.current_columns = columns
         self.count_label.setText(f"{len(self.zip_files)} archives")
         
-        # 加载前几个卡片的缩略图以提高用户体验
+        # Load thumbnails for visible cards to improve initial experience
         self._preload_first_thumbnails()
+        
+        # Schedule visible thumbnails loading after UI is fully rendered
         QTimer.singleShot(100, self._load_visible_thumbnails)
         self.setFocus(Qt.OtherFocusReason)
         
+    def _adjust_cache_size(self):
+        """This method is no longer needed as cache management is handled by the thumbnail service."""
+        pass
+        
     def _preload_first_thumbnails(self):
-        """Preload thumbnails for the first few cards to improve initial experience."""
-        # Preload first 6 cards (typically visible on screen)
-        for i in range(min(6, len(self.cards))):
+        """Preload thumbnails for visible cards to improve initial experience."""
+        # Calculate visible cards based on current columns and rows
+        visible_rows = max(2, self.height() // 300 + 1)  # Assume ~300px card height
+        visible_count = min(self.current_columns * visible_rows, len(self.cards))
+        
+        # Preload visible cards with high priority
+        for i in range(min(visible_count, len(self.cards))):
             card = self.cards[i]
             self._request_cover_thumbnail(card, priority=True)
+        
+        # Preload a few extra cards with lower priority
+        buffer_count = min(5, len(self.cards) - visible_count)
+        for i in range(visible_count, visible_count + buffer_count):
+            card = self.cards[i]
+            self._request_cover_thumbnail(card, priority=False)
         
     def _calculate_columns(self) -> int:
         """Calculate number of columns with improved responsive behavior."""
@@ -443,6 +453,7 @@ class GalleryView(QFrame):
                 row += 1
 
         self.current_columns = columns
+        self._adjust_cache_size()
         QTimer.singleShot(100, self._load_visible_thumbnails)
         
     def _on_card_clicked(self, card: GalleryCard):
@@ -479,7 +490,7 @@ class GalleryView(QFrame):
         self._scroll_timer.start(150)
         
     def _load_visible_thumbnails(self):
-        """Load thumbnails for visible cards."""
+        """Load thumbnails for visible cards with buffer zone."""
         if not self.cards:
             return
             
@@ -491,128 +502,61 @@ class GalleryView(QFrame):
         spacing = (self.grid_layout.verticalSpacing() or 20)
         card_height = (self.cards[0].height() if self.cards else 300) + spacing
         card_height = max(card_height, 200)
-        start_index = max(0, scroll_value // card_height - 1)
-        visible_count = (viewport_height // card_height) + 3
+        
+        # Calculate visible range with buffer zone
+        buffer_zone = 2  # Number of extra rows to preload
+        start_index = max(0, (scroll_value // card_height) - buffer_zone * self.current_columns)
+        visible_rows = (viewport_height // card_height) + 1
+        visible_count = (visible_rows + buffer_zone * 2) * self.current_columns
         end_index = min(len(self.cards), start_index + visible_count)
 
+        # Load thumbnails with priority for truly visible cards
+        visible_start = max(0, scroll_value // card_height)
+        visible_end = min(len(self.cards), visible_start + visible_rows * self.current_columns)
+        
         for i in range(start_index, end_index):
             if i < len(self.cards):
                 card = self.cards[i]
-                self._request_cover_thumbnail(card, priority=True)
+                # Higher priority for actually visible cards
+                is_visible = visible_start <= i <= visible_end
+                self._request_cover_thumbnail(card, priority=is_visible)
         
     def _request_cover_thumbnail(self, card: GalleryCard, priority: bool = False):
-        """Request ZIP cover thumbnail loading.
-
-        This is intentionally optimized for the gallery scrolling experience:
-        - Uses a dedicated cache key for the ZIP cover thumbnail
-        - Avoids loading the full member list (only needs the first image)
-        - Uses a small prioritized queue to keep visible items responsive
-        """
-
+        """Request ZIP cover thumbnail loading."""
         if card.thumbnail_pixmap is not None:
             return
 
-        cover_key = make_zip_cover_thumbnail_key(card.zip_path, self._cover_thumb_size)
-
-        cached_image = self.cache_service.get(cover_key)
-        if cached_image is not None:
-            try:
-                qimage = ImageQt.ImageQt(cached_image)
-                card.set_thumbnail(QPixmap.fromImage(qimage))
-                return
-            except Exception:
-                # Fall through to background reload.
-                pass
-
-        if cover_key in self._cover_thumb_pending or cover_key in self._cover_thumb_inflight:
-            # Already scheduled.
-            return
-
-        card.show_loading_state()
-
-        if priority:
-            self._cover_thumb_queue.appendleft(cover_key)
-        else:
-            self._cover_thumb_queue.append(cover_key)
-        self._cover_thumb_pending.add(cover_key)
-        self._process_cover_thumb_queue()
-
-    def _process_cover_thumb_queue(self):
-        while self._cover_thumb_queue and len(self._cover_thumb_inflight) < self._cover_thumb_max_inflight:
-            cover_key = self._cover_thumb_queue.popleft()
-            if cover_key not in self._cover_thumb_pending:
-                continue
-
-            self._cover_thumb_pending.remove(cover_key)
-            self._cover_thumb_inflight.add(cover_key)
-
-            future = self._cover_thumb_executor.submit(self._load_cover_thumbnail_worker, cover_key)
-            future.add_done_callback(partial(self._on_cover_thumbnail_future_done, cover_key))
-
-    def _on_cover_thumbnail_future_done(self, cover_key: tuple, future):
-        try:
-            qimage = future.result()
-            self.coverThumbnailJobFinished.emit(cover_key, qimage, "")
-        except Exception as e:
-            self.coverThumbnailJobFinished.emit(cover_key, None, str(e))
-
-    def _load_cover_thumbnail_worker(self, cover_key: tuple):
-        cached_image = self.cache_service.get(cover_key)
-        if cached_image is not None:
-            return ImageQt.ImageQt(cached_image)
-
-        _, zip_path, size = cover_key
-
-        # Open ZIP in this worker thread to avoid cross-thread ZipFile sharing.
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            first_image: Optional[str] = None
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                if not ImageExtensions.is_image_file(info.filename):
-                    continue
-                if info.file_size <= 0:
-                    continue
-                if info.file_size > self._cover_thumb_max_load_size:
-                    raise ValueError(f"Cover image too large: {info.file_size} bytes")
-                first_image = info.filename
-                break
-
-            if not first_image:
-                raise ValueError("No images found")
-
-            image_data = zf.read(first_image)
-
-        from io import BytesIO
-
-        with BytesIO(image_data) as image_stream:
-            img = Image.open(image_stream)
-            img.load()
-
-        resample_method = (
-            Image.Resampling.NEAREST if self.app_settings.get('performance_mode', False)
-            else Image.Resampling.LANCZOS
+        # Request thumbnail from service
+        self.thumbnail_service.request_cover_thumbnail(
+            card.zip_path,
+            self.config.get("GALLERY_THUMB_SIZE", (220, 220)),
+            priority,
+            self.app_settings.get('performance_mode', False)
         )
-        img.thumbnail(size, resample_method)
 
-        self.cache_service.put(cover_key, img)
-        return ImageQt.ImageQt(img)
-
-    @Slot(object, object, str)
-    def _on_cover_thumbnail_job_finished(self, cover_key: tuple, qimage, error: str):
-        self._cover_thumb_inflight.discard(cover_key)
-        self._process_cover_thumb_queue()
-
-        zip_path = cover_key[1] if len(cover_key) > 1 else None
+    def _on_thumbnail_loaded(self, result, cache_key):
+        """Handle thumbnail loaded event from service."""
+        zip_path = cache_key[1] if len(cache_key) > 1 else None
         card = self.card_mapping.get(zip_path)
         if card is None or card.thumbnail_pixmap is not None:
             return
 
-        if error or qimage is None:
-            card.show_error_state("Preview failed")
+        if not result.success or result.data is None:
+            # 显示更详细的错误信息
+            error_msg = "Preview failed"
+            if hasattr(result, 'error_message') and result.error_message:
+                error_msg = result.error_message
+            print(f"Thumbnail load failed for {zip_path}: {error_msg}")  # 添加日志输出
+            card.show_error_state(error_msg)
             return
 
-        card.set_thumbnail(QPixmap.fromImage(qimage))
+        try:
+            qimage = ImageQt.ImageQt(result.data)
+            card.set_thumbnail(QPixmap.fromImage(qimage))
+        except Exception as e:
+            error_msg = f"Preview failed: {str(e)}"
+            print(f"Error converting image for {zip_path}: {error_msg}")  # 添加日志输出
+            card.show_error_state(error_msg)
 
     def keyPressEvent(self, event: QKeyEvent):
         """Handle keyboard shortcuts for navigation."""
@@ -759,13 +703,3 @@ class GalleryView(QFrame):
         """Open the currently selected card."""
         if self.selected_card:
             self._on_card_double_clicked(self.selected_card)
-
-    def closeEvent(self, event):
-        try:
-            try:
-                self._cover_thumb_executor.shutdown(wait=False, cancel_futures=True)
-            except TypeError:
-                self._cover_thumb_executor.shutdown(wait=False)
-        except Exception:
-            pass
-        super().closeEvent(event)

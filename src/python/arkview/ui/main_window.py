@@ -333,8 +333,7 @@ class MainWindow(QMainWindow):
             parent=self.central_widget,
             zip_files=self.zip_files,
             app_settings={"performance_mode": self.performance_mode},
-            cache_service=self.cache_service,
-            zip_manager=self.zip_service,  # 将zip_service改为zip_manager以匹配GalleryView构造函数参数
+            thumbnail_service=self.thumbnail_service,
             config=CONFIG,
             ensure_members_loaded_func=self._ensure_members_loaded,
             on_selection_changed=self._on_selection_changed,
@@ -393,12 +392,13 @@ class MainWindow(QMainWindow):
         """Toggle performance mode."""
         self.performance_mode = enabled
         if self.gallery_view:
-            self.gallery_view.update_performance_mode(enabled)
+            # Note: We don't have an update_performance_mode method anymore
+            pass
             
         # Update cache size
         cache_capacity = CONFIG[
             "CACHE_MAX_ITEMS_PERFORMANCE" if enabled else "CACHE_MAX_ITEMS_NORMAL"]
-        self.cache_service.resize_cache(cache_capacity)
+        self.cache_service.resize(cache_capacity)
         
         self.status_bar.showMessage(
             f"Performance mode {'enabled' if enabled else 'disabled'}")

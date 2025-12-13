@@ -289,7 +289,7 @@ class ImageViewerWindow(QMainWindow):
             
     def _fit_image_to_window(self):
         """Scale the image to fit the window size."""
-        if not self.pixmap:
+        if not self.current_pixmap:
             return
             
         # 获取可用空间（减去一些边距）
@@ -297,15 +297,15 @@ class ImageViewerWindow(QMainWindow):
         available_height = self.scroll_area.viewport().height() - 20
         
         # 计算缩放比例
-        pixmap_width = self.pixmap.width()
-        pixmap_height = self.pixmap.height()
+        pixmap_width = self.current_pixmap.width()
+        pixmap_height = self.current_pixmap.height()
         
         scale_x = available_width / pixmap_width
         scale_y = available_height / pixmap_height
         fit_scale = min(scale_x, scale_y)
         
         # 应用缩放
-        scaled_pixmap = self.pixmap.scaled(
+        scaled_pixmap = self.current_pixmap.scaled(
             pixmap_width * fit_scale,
             pixmap_height * fit_scale,
             Qt.KeepAspectRatio,
@@ -330,34 +330,34 @@ class ImageViewerWindow(QMainWindow):
             
     def zoom_in(self):
         """Zoom in on the image."""
-        if self.pixmap:
+        if self.current_pixmap:
             self.auto_fit = False
             self.auto_fit_action.setChecked(False)
             self.scale_factor = min(self.scale_factor * self.zoom_factor, self.max_scale)
-            self._update_image_display()
+            self._update_display()
             self.status_bar.showMessage(f"Zoom: {self.scale_factor:.1f}x")
             
     def zoom_out(self):
         """Zoom out on the image."""
-        if self.pixmap:
+        if self.current_pixmap:
             self.auto_fit = False
             self.auto_fit_action.setChecked(False)
             self.scale_factor = max(self.scale_factor / self.zoom_factor, self.min_scale)
-            self._update_image_display()
+            self._update_display()
             self.status_bar.showMessage(f"Zoom: {self.scale_factor:.1f}x")
             
     def reset_zoom(self):
         """Reset image zoom."""
-        if self.pixmap:
+        if self.current_pixmap:
             self.auto_fit = True
             self.auto_fit_action.setChecked(True)
-            self._update_image_display()
+            self._update_display()
             self.status_bar.showMessage("Zoom reset")
             
     def toggle_auto_fit(self, enabled):
         """Toggle auto fit mode."""
         self.auto_fit = enabled
-        self._update_image_display()
+        self._update_display()
         if enabled:
             self.status_bar.showMessage("Auto fit enabled")
         else:
