@@ -1,180 +1,112 @@
-# Arkview 分层架构设计文档
+# Arkview Architecture
 
-## 1. 概述
+## Overview
 
-本文档详细描述了 Arkview 项目的分层架构设计方案，旨在分离 UI 代码和业务逻辑，提高代码的可维护性、可测试性和可扩展性。
+Arkview is a modern, high-performance image browser designed for quickly browsing images stored in ZIP archives. It uses a hybrid architecture combining Rust's I/O performance advantages with Python's flexibility in UI development.
 
-## 2. 设计目标
+## Key Components
 
-1. **关注点分离**：清晰划分 UI 层、服务层和核心层的职责
-2. **松耦合**：各层之间通过明确定义的接口进行交互
-3. **可测试性**：业务逻辑可以独立于 UI 进行测试
-4. **可维护性**：便于定位问题和添加新功能
-5. **向后兼容**：确保重构过程中不影响现有功能
+### 1. Core Layer
 
-## 3. 架构层次
+Located in `src/python/arkview/core/`, this layer contains fundamental data structures and utilities:
 
-### 3.1 表示层 (Presentation Layer)
+- `models.py`: Data models like `ZipFileInfo` and utility functions
+- `cache.py`: LRU cache implementation for efficient data storage
+- `file_manager.py`: `ZipFileManager` class for managing ZIP file resources
 
-负责 UI 渲染和用户交互处理。
+### 2. Service Layer
 
-#### 3.1.1 目录结构
-```
-src/python/arkview/ui/
-├── __init__.py
-├── main_window.py      # 主窗口
-├── gallery_view.py     # 画廊视图
-├── viewer_window.py    # 查看器窗口
-└── dialogs.py          # 对话框组件
-```
+Located in `src/python/arkview/services/`, this layer encapsulates business logic and provides clean APIs:
 
-#### 3.1.2 职责
-- UI 元素的创建和布局
-- 用户事件的处理和转发
-- 数据展示和界面更新
-- 不包含任何业务逻辑
+- `zip_service.py`: `ZipService` for ZIP scanning and analysis operations
+- `image_service.py`: `ImageService` for image loading and processing
+- `thumbnail_service.py`: `ThumbnailService` for thumbnail generation and caching
+- `cache_service.py`: High-level cache management services
+- `config_service.py`: Application configuration management
 
-#### 3.1.3 依赖关系
-- 依赖服务层提供的接口
-- 不直接访问核心层或第三方库进行业务处理
+### 3. UI Layer
 
-### 3.2 服务层 (Service Layer)
+Located in `src/python/arkview/ui/`, this layer handles user interface presentation:
 
-封装业务逻辑，为 UI 层提供简洁的接口。
+- `main_window.py`: Main application window
+- `viewer_window.py`: Full-screen image viewer
+- `gallery_view.py`: Thumbnail gallery view
+- `dialogs.py`: Various dialog implementations
 
-#### 3.2.1 目录结构
-```
-src/python/arkview/services/
-├── __init__.py
-├── zip_service.py         # ZIP 文件处理服务
-├── image_service.py       # 图像处理服务
-├── thumbnail_service.py   # 缩略图加载服务
-├── cache_service.py       # 缓存管理服务
-└── config_service.py      # 配置管理服务
-```
-
-#### 3.2.2 职责
-- 实现具体的业务逻辑
-- 协调核心层的操作
-- 管理应用状态
-- 处理异步任务和线程管理
-
-#### 3.2.3 依赖关系
-- 依赖核心层提供的功能
-- 可调用其他服务
-- 不涉及 UI 相关操作
-
-### 3.3 核心层 (Core Layer)
-
-提供基础数据结构和核心功能实现。
-
-#### 3.3.1 目录结构
-```
-src/python/arkview/core/
-├── __init__.py
-├── models.py          # 数据模型
-├── cache.py           # 缓存实现
-├── file_manager.py    # 文件管理
-├── rust_bindings.py   # Rust 绑定接口
-└── utils.py           # 工具函数
-```
-
-#### 3.3.2 职责
-- 定义核心数据结构
-- 实现基础功能（如缓存、文件管理）
-- 提供与 Rust 后端的接口
-- 最小化外部依赖
-
-#### 3.3.3 依赖关系
-- 可依赖标准库和第三方库
-- 不依赖 UI 层和服务层
-- Rust 绑定模块提供高性能实现
-
-## 4. 数据流向
+## Data Flow
 
 ```
-+---------------+        +--------------+        +-------------+
-|   UI Layer    | <----> | Service Layer| <----> | Core Layer  |
-+---------------+        +--------------+        +-------------+
-       ^                        ^                       ^
-       |                        |                       |
-       v                        v                       v
-+---------------+        +--------------+        +-------------+
-| User Events   |        | Business     |        | Data &      |
-| & Rendering   |        | Logic        |        | Low-level   |
-|               |        |              |        | Operations  |
-+---------------+        +--------------+        +-------------+
+[UI Layer]
+    ↓ (uses)
+[Service Layer] ←→ [Cache Service]
+    ↓ (uses)
+[Core Layer]
+    ↓ (calls)
+[Rust Backend via PyO3]
 ```
 
-## 5. 关键设计原则
+## Key Classes and Responsibilities
 
-### 5.1 依赖倒置原则
-高层模块不应该依赖低层模块，两者都应该依赖抽象。
+### ZipFileManager (Core Layer)
+Manages opening and closing of ZipFile objects to avoid resource leaks:
+- Implements LRU (Least Recently Used) strategy for keeping frequently accessed ZIP files open
+- Thread-safe implementation using locks
+- Limits maximum number of concurrently open ZIP files
 
-### 5.2 单一职责原则
-每个类或模块应该只有一个引起它变化的原因。
+### ZipService (Service Layer)
+Provides higher-level ZIP file operations:
+- ZIP content analysis to identify image-only archives
+- Integration with Rust backend for performance acceleration
+- Timeout control and batch processing capabilities
+- Uses ZipFileManager internally for resource management
 
-### 5.3 接口隔离原则
-使用多个专门的接口比使用单一的总接口要好。
+### ImageService (Service Layer)
+Handles image loading and processing operations:
+- Asynchronous image loading from ZIP archives
+- Caching mechanisms for improved performance
+- Preloading strategies for smooth browsing experience
 
-### 5.4 依赖注入
-通过构造函数或属性注入依赖，提高可测试性和灵活性。
+### ThumbnailService (Service Layer)
+Specialized service for thumbnail generation:
+- Dedicated worker threads for thumbnail processing
+- Integration with caching systems
+- Performance optimization modes
 
-## 6. 线程和并发处理
+## Communication Patterns
 
-遵循 [PySide6 GUI 应用线程管理与并发处理统一规范](#)：
+### Qt Signal/Slot Mechanism
+Used extensively for asynchronous operations:
+- Image loading completion notifications
+- Progress updates
+- Error reporting
 
-1. 所有耗时操作必须在工作线程中执行
-2. 使用 QThread 配合信号/槽机制处理后台任务
-3. 使用 Qt 信号替代 queue.Queue 进行线程间通信
-4. 禁止使用 Python 标准库的 threading 模块创建线程
+### Dependency Injection
+Services are injected into UI components to promote loose coupling:
+- Cache services injected into image services
+- Image services injected into thumbnail services
+- Services injected into UI components
 
-## 7. 实施计划
+## Rust Integration
 
-### 7.1 第一阶段：重构核心层
-1. 将 core.py 拆分为多个模块：
-   - models.py (数据模型)
-   - cache.py (缓存实现)
-   - file_manager.py (文件管理)
-   - rust_bindings.py (Rust 绑定接口)
-2. 保持原有功能不变，确保向后兼容
+The Rust backend provides performance-critical functionality:
+- Fast ZIP file scanning and analysis
+- Optimized image processing routines
+- Parallel processing capabilities
 
-### 7.2 第二阶段：创建服务层
-1. 创建 services/ 目录
-2. 实现各个服务类：
-   - ZipService - 处理 ZIP 文件扫描和分析
-   - ImageService - 处理图像加载和处理
-   - ThumbnailService - 处理缩略图加载
-   - ConfigService - 配置管理
+Communication with Python occurs through PyO3 FFI bindings.
 
-### 7.3 第三阶段：重构 UI 层
-1. 创建 ui/ 目录
-2. 将现有 UI 代码移至对应文件
-3. 修改 UI 代码，通过服务层访问业务逻辑
+## Caching Strategy
 
-### 7.4 第四阶段：依赖注入和接口定义
-1. 定义服务接口（抽象基类）
-2. 使用依赖注入方式将服务实例传递给 UI 组件
-3. 确保各层之间的松耦合
+Arkview implements multi-layered caching:
+- Primary cache for full-size images
+- Thumbnail cache for preview images
+- Metadata cache for ZIP file information
 
-## 8. 预期收益
+LRU eviction policy ensures optimal memory usage while maintaining performance.
 
-1. **可维护性提升**：各层职责明确，便于定位和修复问题
-2. **可测试性增强**：可以单独对服务层进行单元测试
-3. **可扩展性改善**：添加新功能只需在相应层增加代码
-4. **团队协作优化**：UI 开发人员和后端开发人员可以并行工作
-5. **代码复用性提高**：服务层可以在不同 UI 组件中复用
+## Threading Model
 
-## 9. 风险和缓解措施
-
-### 9.1 性能风险
-- **风险**：分层可能引入额外的函数调用开销
-- **缓解措施**：通过性能测试验证，必要时进行优化
-
-### 9.2 兼容性风险
-- **风险**：重构过程可能引入兼容性问题
-- **缓解措施**：保持接口稳定，逐步重构，充分测试
-
-### 9.3 迁移风险
-- **风险**：大量代码需要修改，容易引入 bug
-- **缓解措施**：分阶段实施，每阶段进行充分测试
+- UI runs on main thread
+- Image loading operations occur in worker threads
+- Thumbnail generation uses dedicated thread pool
+- ZIP file I/O managed through resource manager with thread safety

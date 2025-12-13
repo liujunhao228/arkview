@@ -1,76 +1,71 @@
 """
-File manager for Arkview core layer.
-Handles opening and closing of ZipFile objects to avoid resource leaks.
+File manager implementation for Arkview core layer.
+Manages opening and closing of ZipFile objects to avoid resource leaks.
 """
 
 import os
 import threading
 import zipfile
-from typing import Optional, OrderedDict
-from collections import OrderedDict as CollectionsOrderedDict
+from collections import OrderedDict
+from typing import Optional, Dict
+try:
+    from .. import arkview_core
+    RUST_AVAILABLE = True
+    ZipScannerRust = arkview_core.ZipScanner
+except ImportError:
+    RUST_AVAILABLE = False
+    ZipScannerRust = None
 
 
 class ZipFileManager:
     """Manages opening and closing of ZipFile objects to avoid resource leaks."""
-    
     def __init__(self, max_open_files: int = 10):
-        self._open_files: OrderedDict = CollectionsOrderedDict()
+        self._open_files: OrderedDict = OrderedDict()
         self._lock = threading.Lock()
         self._max_open_files = max_open_files
+        if RUST_AVAILABLE:
+            self.image_processor = arkview_core.ImageProcessor()
 
-    def get_zipfile(self, path: str) -> Optional[zipfile.ZipFile]:
-        """Gets or opens a ZipFile object for the given path."""
-        abs_path = os.path.abspath(path)
+    def get_zip(self, zip_path: str) -> Optional[zipfile.ZipFile]:
+        """Get a ZipFile object, opening it if necessary."""
         with self._lock:
-            if abs_path in self._open_files:
-                zf = self._open_files.pop(abs_path)
-                # Move to end to mark as most recently used
-                self._open_files[abs_path] = zf
-                return zf
+            if zip_path in self._open_files:
+                # Move to end (most recently used)
+                self._open_files.move_to_end(zip_path)
+                return self._open_files[zip_path]
+            
+            # Check if we need to close oldest files
+            while len(self._open_files) >= self._max_open_files:
+                # Remove least recently used
+                oldest_path, oldest_file = self._open_files.popitem(last=False)
+                try:
+                    oldest_file.close()
+                except Exception:
+                    pass  # Ignore errors when closing
+            
             try:
-                if not os.path.exists(abs_path):
-                    print(f"ZipManager Warning: File not found at {abs_path}")
-                    return None
-                zf = zipfile.ZipFile(path, 'r')
-                self._open_files[abs_path] = zf
-
-                # Enforce LRU capacity
-                if len(self._open_files) > self._max_open_files:
-                    oldest_path, oldest_zf = self._open_files.popitem(last=False)
-                    try:
-                        oldest_zf.close()
-                    except Exception as e:
-                        print(f"ZipManager Warning: Error closing {oldest_path} during eviction: {e}")
-
-                return zf
-            except (FileNotFoundError, zipfile.BadZipFile, IsADirectoryError, PermissionError) as e:
-                print(f"ZipManager Error: Failed to open {path}: {e}")
-                if abs_path in self._open_files:
-                    del self._open_files[abs_path]
-                return None
-            except Exception as e:
-                print(f"ZipManager Error: Unexpected error opening {path}: {e}")
-                if abs_path in self._open_files:
-                    del self._open_files[abs_path]
+                zip_file = zipfile.ZipFile(zip_path, 'r')
+                self._open_files[zip_path] = zip_file
+                return zip_file
+            except Exception:
                 return None
 
-    def close_zipfile(self, path: str):
-        """Close a specific zipfile."""
-        abs_path = os.path.abspath(path)
+    def release_zip(self, zip_path: str):
+        """Explicitly release a zip file."""
         with self._lock:
-            if abs_path in self._open_files:
+            if zip_path in self._open_files:
+                zip_file = self._open_files.pop(zip_path)
                 try:
-                    zf = self._open_files.pop(abs_path)
-                    zf.close()
-                except Exception as e:
-                    print(f"ZipManager Warning: Error closing {path}: {e}")
+                    zip_file.close()
+                except Exception:
+                    pass  # Ignore errors when closing
 
-    def close_all(self):
-        """Close all open zipfiles."""
+    def clear(self):
+        """Close all open zip files."""
         with self._lock:
-            while self._open_files:
-                abs_path, zf = self._open_files.popitem(last=False)
+            for zip_file in self._open_files.values():
                 try:
-                    zf.close()
-                except Exception as e:
-                    print(f"ZipManager Warning: Error closing {abs_path} during close_all: {e}")
+                    zip_file.close()
+                except Exception:
+                    pass  # Ignore errors when closing
+            self._open_files.clear()

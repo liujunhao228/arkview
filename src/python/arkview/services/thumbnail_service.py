@@ -1,18 +1,25 @@
 """
 Thumbnail service implementation for Arkview.
-Handles loading and caching of thumbnails with Qt signal/slot mechanism.
+Handles loading and caching of thumbnails.
 """
 
-from typing import Tuple, Optional, TYPE_CHECKING
-from PySide6.QtCore import QObject, Signal, Slot, QThread
-
-if TYPE_CHECKING:
-    from ..core.cache import LRUCache
-    from ..core.file_manager import ZipFileManager
-    from ..core.models import LoadResult
+import os
+import traceback
+import zipfile
+from typing import Optional, List, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from PIL import Image, UnidentifiedImageError
+from PySide6.QtCore import QObject, Signal, Slot, QThread, QMutex, QMutexLocker
 
 from ..core.models import LoadResult
-from .image_service import ImageService
+from ..core.file_manager import ZipFileManager
+try:
+    from ..core import arkview_core
+    RUST_AVAILABLE = True
+    ImageProcessorRust = arkview_core.ImageProcessor
+except ImportError:
+    RUST_AVAILABLE = False
+    ImageProcessorRust = None
 
 
 class ThumbnailWorker(QObject):
@@ -20,10 +27,13 @@ class ThumbnailWorker(QObject):
     thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
     finished = Signal()  # Signal emitted when worker finishes
     
-    def __init__(self, image_service: ImageService):
+    def __init__(self, cache_service, config):
         super().__init__()
-        self.image_service = image_service
+        self.cache_service = cache_service
+        self.config = config
         self.running = True
+        from ..services.image_service import ImageService
+        self.image_service = ImageService(cache_service, ZipFileManager())
 
     @Slot(str, str, tuple, int, tuple, bool)
     def load_thumbnail(self, zip_path: str, member_path: str, cache_key: tuple,
@@ -56,30 +66,34 @@ class ThumbnailWorker(QObject):
 
 
 class ThumbnailService(QObject):
-    """Service for managing thumbnail loading with Qt threading."""
+    """Service for handling thumbnail loading and caching operations."""
     
-    # Signal to request thumbnail loading
-    load_thumbnail_request = Signal(str, str, tuple, int, tuple, bool)
-    # Signal emitted when thumbnail is loaded
+    # Signals for async operations
     thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
+    batchProcessed = Signal(list)
+    errorOccurred = Signal(str, str, str)  # zip_path, member_name, error_msg
     
-    def __init__(self, cache_service, zip_manager: 'ZipFileManager', config: dict):
+    def __init__(self, cache_service, config):
         super().__init__()
         self.cache_service = cache_service
-        self.zip_manager = zip_manager
         self.config = config
-        
-        # Create image service
-        self.image_service = ImageService(cache_service, zip_manager)
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        self._mutex = QMutex()
+        self.zip_manager = ZipFileManager()
+        if RUST_AVAILABLE:
+            self.image_processor = ImageProcessorRust()
+        else:
+            self.image_processor = None
         
         # Create worker thread and worker
         self.worker_thread = QThread()
-        self.worker = ThumbnailWorker(self.image_service)
+        self.worker = ThumbnailWorker(cache_service, config)
+        
+        # Move worker to thread
         self.worker.moveToThread(self.worker_thread)
         
         # Connect signals
-        self.load_thumbnail_request.connect(self.worker.load_thumbnail)
-        self.worker.thumbnailLoaded.connect(self._on_thumbnail_loaded)
+        self.worker.thumbnailLoaded.connect(self.thumbnailLoaded)
         self.worker.finished.connect(self.worker_thread.quit)
         
         # Start the worker thread
@@ -88,14 +102,9 @@ class ThumbnailService(QObject):
     def request_thumbnail(self, zip_path: str, member_path: str, cache_key: tuple,
                          max_size: int, resize_params: tuple, performance_mode: bool):
         """Request loading of a thumbnail."""
-        self.load_thumbnail_request.emit(
-            zip_path, member_path, cache_key, max_size, resize_params, performance_mode
-        )
+        self.worker.load_thumbnail(zip_path, member_path, cache_key, max_size, resize_params, performance_mode)
 
-    def _on_thumbnail_loaded(self, result: LoadResult, cache_key: tuple):
-        """Handle thumbnail loaded event - to be connected in UI layer."""
-        # Emit the thumbnailLoaded signal for the UI layer to handle
-        self.thumbnailLoaded.emit(result, cache_key)
+    # No need for _on_thumbnail_loaded method as we connect worker directly to thumbnailLoaded signal
 
     def stop_service(self):
         """Stop the thumbnail service and cleanup resources."""

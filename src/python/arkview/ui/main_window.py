@@ -31,21 +31,19 @@ import PIL.ImageQt
 # Import configuration
 from ..config import CONFIG, parse_human_size
 
-# Import services instead of core modules
+# Import services only
 from ..services.zip_service import ZipService
 from ..services.image_service import ImageService
 from ..services.thumbnail_service import ThumbnailService
 from ..services.config_service import ConfigService
-from ..services.cache_service import EnhancedCacheService
+from ..services.cache_service import CacheService
 
 # Import UI components
 from ..ui.dialogs import SettingsDialog
 from ..ui.viewer_window import ImageViewerWindow
 from ..ui.gallery_view import GalleryView
 
-# Import core components that don't contain business logic
-from ..core.cache import LRUCache
-from ..core.file_manager import ZipFileManager
+# Import core models (these don't contain business logic)
 from ..core.models import LoadResult, _format_size
 
 
@@ -69,16 +67,15 @@ class MainWindow(QMainWindow):
         
     def _initialize_services(self):
         """Initialize all required services."""
-        # Initialize core components
-        self.cache_service = EnhancedCacheService(CONFIG["CACHE_MAX_ITEMS_NORMAL"])
-        self.zip_manager = ZipFileManager()
-        
         # Initialize services
+        self.cache_service = CacheService(capacity=CONFIG["CACHE_MAX_ITEMS_NORMAL"])
+
+        # Initialize other services
         self.zip_service = ZipService()
-        self.image_service = ImageService(self.cache_service, self.zip_manager)
-        self.thumbnail_service = ThumbnailService(self.cache_service, self.zip_manager, CONFIG)
+        self.image_service = ImageService(self.cache_service)
+        self.thumbnail_service = ThumbnailService(self.cache_service, CONFIG)
         self.config_service = ConfigService()
-        
+
         # Connect thumbnail service signals
         self.thumbnail_service.thumbnailLoaded.connect(self._on_thumbnail_loaded)
         
@@ -99,6 +96,33 @@ class MainWindow(QMainWindow):
         # Setup status bar
         self._setup_status_bar()
         
+    def _show_cache_stats(self):
+        """显示缓存统计信息"""
+        try:
+            stats = self.cache_service.get_detailed_stats()
+            hit_rate = stats['stats']['hit_rate']
+            efficiency = stats.get('cache_efficiency', 0)
+            
+            self.status_bar.showMessage(
+                f"缓存命中率: {hit_rate:.1%}, 效率得分: {efficiency:.2f}, "
+                f"内存使用: {stats.get('memory_estimate', {}).get('total_mb', '未知')}"
+            )
+        except Exception as e:
+            print(f"获取缓存统计信息时出错: {e}")
+            
+    def _preload_images(self, zip_path: str, members: List[str], current_index: int):
+        """预加载相邻图片"""
+        try:
+            neighbor_count = 2 if not self.app_settings.get('performance_mode', False) else 1
+            target_size = None  # 预加载全尺寸图像
+            
+            self.image_service.preload_neighbor_images(
+                zip_path, members, current_index, neighbor_count, 
+                target_size, self.app_settings.get('performance_mode', False)
+            )
+        except Exception as e:
+            print(f"预加载图片时出错: {e}")
+            
     def _setup_menu_bar(self):
         """Setup the menu bar."""
         menubar = self.menuBar()
@@ -307,7 +331,7 @@ class MainWindow(QMainWindow):
             zip_files=self.zip_files,
             app_settings={"performance_mode": self.performance_mode},
             cache_service=self.cache_service,
-            zip_manager=self.zip_manager,
+            zip_manager=self.zip_service,  # 将zip_service改为zip_manager以匹配GalleryView构造函数参数
             config=CONFIG,
             ensure_members_loaded_func=self._ensure_members_loaded,
             on_selection_changed=self._on_selection_changed,
@@ -350,15 +374,10 @@ class MainWindow(QMainWindow):
     def _open_viewer(self, zip_path: str, members: List[str], index: int):
         """Open the image viewer."""
         viewer = ImageViewerWindow(
-            zip_path=zip_path,
-            image_members=members,
-            initial_index=index,
             image_service=self.image_service,
-            zip_manager=self.zip_manager,
-            config=CONFIG,
-            performance_mode=self.performance_mode,
             parent=self
         )
+        viewer.populate(zip_path, members, index)
         viewer.show()
         
     def _on_thumbnail_loaded(self, result: LoadResult, cache_key: tuple):
@@ -455,5 +474,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event."""
         self.thumbnail_service.stop_service()
-        self.zip_manager.close_all()
+        self.zip_service.zip_manager.clear()
         event.accept()

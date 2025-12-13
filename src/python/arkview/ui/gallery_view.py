@@ -16,11 +16,11 @@ from PySide6.QtGui import QPixmap, QCursor, QKeyEvent
 from PIL import Image
 import PIL.ImageQt
 
-# 修改导入，使用增强的缓存服务
-from ..services.cache_service import EnhancedCacheService
+from ..services.cache_service import CacheService
 from ..core.file_manager import ZipFileManager
 from ..core.models import LoadResult
 from ..core import _format_size
+from ..core.unified_cache import UnifiedCacheService
 
 
 class GalleryCard(QFrame):
@@ -230,7 +230,7 @@ class GalleryView(QFrame):
         parent: QWidget,
         zip_files: Dict[str, Tuple[Optional[List[str]], float, int, int]],
         app_settings: Dict[str, Any],
-        cache_service: EnhancedCacheService,  # 修改参数类型
+        cache_service: UnifiedCacheService,  # 修改参数类型
         zip_manager: ZipFileManager,
         config: Dict[str, Any],
         ensure_members_loaded_func: Callable[[str], Optional[List[str]]],
@@ -362,8 +362,18 @@ class GalleryView(QFrame):
 
         self.current_columns = columns
         self.count_label.setText(f"{len(self.zip_files)} archives")
+        
+        # 加载前几个卡片的缩略图以提高用户体验
+        self._preload_first_thumbnails()
         QTimer.singleShot(100, self._load_visible_thumbnails)
         self.setFocus(Qt.OtherFocusReason)
+        
+    def _preload_first_thumbnails(self):
+        """Preload thumbnails for the first few cards to improve initial experience."""
+        # Preload first 6 cards (typically visible on screen)
+        for i in range(min(6, len(self.cards))):
+            card = self.cards[i]
+            self._load_card_thumbnail(card, priority=True)
         
     def _calculate_columns(self) -> int:
         """Calculate number of columns with improved responsive behavior."""
@@ -468,8 +478,8 @@ class GalleryView(QFrame):
                 card = self.cards[i]
                 self._load_card_thumbnail(card)
         
-    def _load_card_thumbnail(self, card: GalleryCard):
-        """Load thumbnail for a specific card with improved error handling."""
+    def _load_card_thumbnail(self, card: GalleryCard, priority: bool = False):
+        """Load thumbnail for a specific card with improved error handling and caching."""
         if card.thumbnail_pixmap is not None:
             return
 
@@ -488,7 +498,7 @@ class GalleryView(QFrame):
             return
 
         first_image = card.members[0]
-        # 创建包含目标尺寸的缓存键，避免完整图像和缩略图之间的缓存冲突
+        # 创建包含目标尺寸和缓存区域的键
         cache_key = ((card.zip_path, first_image), (210, 210))
 
         cached_image = self.cache_service.get(cache_key)

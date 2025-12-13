@@ -5,48 +5,38 @@
 本改进旨在提升 Arkview 的缓存管理能力，主要包括以下几个方面：
 
 1. **统一缓存接口** - 提供一致的缓存访问接口
-2. **多级缓存策略** - 针对不同类型的数据使用专门的缓存
-3. **改进的缓存键设计** - 确保不同尺寸的图像使用不同的缓存键
-4. **缓存统计和监控** - 提供详细的缓存使用情况报告
-5. **增强的内存管理** - 更好地释放不再需要的图像资源
+2. **改进的缓存键设计** - 确保不同尺寸的图像使用不同的缓存键
+3. **缓存统计和监控** - 提供详细的缓存使用情况报告
+4. **增强的内存管理** - 更好地释放不再需要的图像资源
 
 ## 新增组件
 
-### EnhancedCacheService
+### UnifiedCacheService
 
-这是新的缓存服务类，提供了多级缓存和统计功能。
+这是目前使用的缓存服务类，提供了基础但高效的缓存功能。
 
 #### 初始化
 
 ```python
-from ..services.cache_service import EnhancedCacheService
+from ..services.cache_service import UnifiedCacheService
 
-cache_service = EnhancedCacheService(capacity=50)
+cache_service = UnifiedCacheService(capacity=50)
 ```
-
-#### 多级缓存
-
-EnhancedCacheService 提供三种缓存类型：
-
-1. **primary_cache** - 主缓存，用于存储完整尺寸的图像
-2. **thumbnail_cache** - 缩略图缓存，容量为主缓存的一半
-3. **metadata_cache** - 元数据缓存，固定容量100
 
 #### 使用方法
 
 ```python
-# 存储数据到特定缓存
-cache_service.put(key, image, cache_type="thumbnail")
+# 存储数据到缓存
+cache_service.put(key, image)
 
-# 从特定缓存获取数据
-cached_image = cache_service.get(key, cache_type="thumbnail")
+# 从缓存获取数据
+cached_image = cache_service.get(key)
 
 # 清空缓存
-cache_service.clear("thumbnail")  # 清空特定缓存
-cache_service.clear("all")        # 清空所有缓存
+cache_service.clear()
 
 # 调整缓存容量
-cache_service.resize(100, "all")  # 调整所有缓存容量
+cache_service.resize(100)
 
 # 获取统计信息
 stats = cache_service.get_stats()
@@ -87,11 +77,11 @@ self.cache_service.put(enhanced_cache_key, img, cache_type)
 
 ```python
 # 在 MainWindow 中初始化
-self.cache_service = EnhancedCacheService(CONFIG["CACHE_MAX_ITEMS_NORMAL"])
+self.cache_service = UnifiedCacheService(CONFIG["CACHE_MAX_ITEMS_NORMAL"])
 
 # 查看缓存统计信息
 stats = self.cache_service.get_stats()
-print(f"缓存命中率: {stats['stats']['hit_rate']:.2%}")
+print(f"缓存命中率: {stats['hit_rate']:.2%}")
 ```
 
 ## 向后兼容性

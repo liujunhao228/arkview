@@ -1,53 +1,107 @@
-"""Configuration module for Arkview."""
+"""
+Configuration module for Arkview application.
+This module defines shared constants and configuration options.
+"""
 
-import os
-from typing import Any, Dict, Set
+# Maximum file size allowed (500MB in bytes)
+MAX_FILE_SIZE = 500 * 1024 * 1024
+
+# Maximum number of entries allowed in ZIP file
+MAX_ENTRIES = 10000
+
+# Entry processing limit
+ENTRY_LIMIT = 1000
+
+# Analysis timeout (in seconds)
+ANALYSIS_TIMEOUT = 15
+
+# Supported image file extensions
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'}
+
+# Thumbnail dimensions
+THUMBNAIL_SIZE = (280, 280)
+PERFORMANCE_THUMBNAIL_SIZE = (180, 180)
+GALLERY_THUMB_SIZE = (220, 220)
+GALLERY_PREVIEW_SIZE = (480, 480)
+
+# Batch processing settings
+BATCH_SCAN_SIZE = 50
+BATCH_UPDATE_INTERVAL = 20
+
+# Size limits for different operations
+MAX_THUMBNAIL_LOAD_SIZE = 10 * 1024 * 1024
+PERFORMANCE_MAX_THUMBNAIL_LOAD_SIZE = 3 * 1024 * 1024
+MAX_VIEWER_LOAD_SIZE = 100 * 1024 * 1024
+PERFORMANCE_MAX_VIEWER_LOAD_SIZE = 30 * 1024 * 1024
+
+# Cache settings
+CACHE_MAX_ITEMS_NORMAL = 50
+CACHE_MAX_ITEMS_PERFORMANCE = 25
+
+# Preload settings
+PRELOAD_VIEWER_NEIGHBORS_NORMAL = 2
+PRELOAD_VIEWER_NEIGHBORS_PERFORMANCE = 1
+PRELOAD_NEXT_THUMBNAIL = True
+
+# Window settings
+WINDOW_SIZE = (1050, 750)
+
+# Viewer settings
+VIEWER_ZOOM_FACTOR = 1.2
+VIEWER_MAX_ZOOM = 10.0
+VIEWER_MIN_ZOOM = 0.1
+
+# Cache mode settings
+USE_SIMPLE_CACHE = True
+DEFAULT_CACHE_CAPACITY = 50
+
+# Other settings
+PREVIEW_UPDATE_DELAY = 250
+THREAD_POOL_WORKERS = 8
+APP_VERSION = "4.0 - Rust-Python Hybrid"
 
 
-CONFIG: Dict[str, Any] = {
-    "IMAGE_EXTENSIONS": {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'},
-    "THUMBNAIL_SIZE": (280, 280),
-    "PERFORMANCE_THUMBNAIL_SIZE": (180, 180),
-    "GALLERY_THUMB_SIZE": (220, 220),
-    "GALLERY_PREVIEW_SIZE": (480, 480),
-    "BATCH_SCAN_SIZE": 50,  # Number of files to scan in one batch
-    "BATCH_UPDATE_INTERVAL": 20,  # UI update interval (number of files)
-    "MAX_THUMBNAIL_LOAD_SIZE": 10 * 1024 * 1024,
-    "PERFORMANCE_MAX_THUMBNAIL_LOAD_SIZE": 3 * 1024 * 1024,
-    "MAX_VIEWER_LOAD_SIZE": 100 * 1024 * 1024,
-    "PERFORMANCE_MAX_VIEWER_LOAD_SIZE": 30 * 1024 * 1024,
-    "CACHE_MAX_ITEMS_NORMAL": 50,
-    "CACHE_MAX_ITEMS_PERFORMANCE": 25,
-    "PRELOAD_VIEWER_NEIGHBORS_NORMAL": 2,
-    "PRELOAD_VIEWER_NEIGHBORS_PERFORMANCE": 1,
-    "PRELOAD_NEXT_THUMBNAIL": True,
-    "WINDOW_SIZE": (1050, 750),
-    "VIEWER_ZOOM_FACTOR": 1.2,
-    "VIEWER_MAX_ZOOM": 10.0,
-    "VIEWER_MIN_ZOOM": 0.1,
-    "PREVIEW_UPDATE_DELAY": 250,
-    "THREAD_POOL_WORKERS": min(8, (os.cpu_count() or 1) + 4),
-    "APP_VERSION": "4.0 - Rust-Python Hybrid",
+def parse_human_size(size_bytes: int) -> str:
+    """Formats byte size into a human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024**2:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024**3:
+        return f"{size_bytes / 1024**2:.1f} MB"
+    else:
+        return f"{size_bytes / 1024**3:.1f} GB"
+
+
+# Application configuration dictionary
+CONFIG = {
+    "MAX_FILE_SIZE": MAX_FILE_SIZE,
+    "MAX_ENTRIES": MAX_ENTRIES,
+    "ENTRY_LIMIT": ENTRY_LIMIT,
+    "ANALYSIS_TIMEOUT": ANALYSIS_TIMEOUT,
+    "IMAGE_EXTENSIONS": IMAGE_EXTENSIONS,
+    "THUMBNAIL_SIZE": THUMBNAIL_SIZE,
+    "PERFORMANCE_THUMBNAIL_SIZE": PERFORMANCE_THUMBNAIL_SIZE,
+    "GALLERY_THUMB_SIZE": GALLERY_THUMB_SIZE,
+    "GALLERY_PREVIEW_SIZE": GALLERY_PREVIEW_SIZE,
+    "BATCH_SCAN_SIZE": BATCH_SCAN_SIZE,
+    "BATCH_UPDATE_INTERVAL": BATCH_UPDATE_INTERVAL,
+    "MAX_THUMBNAIL_LOAD_SIZE": MAX_THUMBNAIL_LOAD_SIZE,
+    "PERFORMANCE_MAX_THUMBNAIL_LOAD_SIZE": PERFORMANCE_MAX_THUMBNAIL_LOAD_SIZE,
+    "MAX_VIEWER_LOAD_SIZE": MAX_VIEWER_LOAD_SIZE,
+    "PERFORMANCE_MAX_VIEWER_LOAD_SIZE": PERFORMANCE_MAX_VIEWER_LOAD_SIZE,
+    "CACHE_MAX_ITEMS_NORMAL": CACHE_MAX_ITEMS_NORMAL,
+    "CACHE_MAX_ITEMS_PERFORMANCE": CACHE_MAX_ITEMS_PERFORMANCE,
+    "PRELOAD_VIEWER_NEIGHBORS_NORMAL": PRELOAD_VIEWER_NEIGHBORS_NORMAL,
+    "PRELOAD_VIEWER_NEIGHBORS_PERFORMANCE": PRELOAD_VIEWER_NEIGHBORS_PERFORMANCE,
+    "PRELOAD_NEXT_THUMBNAIL": PRELOAD_NEXT_THUMBNAIL,
+    "WINDOW_SIZE": WINDOW_SIZE,
+    "VIEWER_ZOOM_FACTOR": VIEWER_ZOOM_FACTOR,
+    "VIEWER_MAX_ZOOM": VIEWER_MAX_ZOOM,
+    "VIEWER_MIN_ZOOM": VIEWER_MIN_ZOOM,
+    "USE_SIMPLE_CACHE": USE_SIMPLE_CACHE,
+    "DEFAULT_CACHE_CAPACITY": DEFAULT_CACHE_CAPACITY,
+    "PREVIEW_UPDATE_DELAY": PREVIEW_UPDATE_DELAY,
+    "THREAD_POOL_WORKERS": THREAD_POOL_WORKERS,
+    "APP_VERSION": APP_VERSION,
 }
-
-
-def parse_human_size(size_str: str) -> int:
-    """Parses human-readable size string into bytes."""
-    import re
-    
-    size_str = size_str.strip().upper()
-    if not size_str:
-        return None
-    match = re.match(r'^(\d+(?:\.\d+)?)\s*([KMGT])?B?$', size_str)
-    if not match:
-        if size_str.isdigit():
-            return int(size_str)
-        return -1
-
-    value = float(match.group(1))
-    unit = match.group(2)
-
-    multipliers = {'G': 1024**3, 'M': 1024**2, 'K': 1024, None: 1}
-    multiplier = multipliers.get(unit, 1)
-
-    return int(value * multiplier)

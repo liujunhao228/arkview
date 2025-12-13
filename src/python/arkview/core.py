@@ -24,74 +24,11 @@ except ImportError:
     ZipScannerRust = None
     ImageProcessorRust = None
 
+# Import LRUCache from external module instead of using redundant implementation
+from .cache import LRUCache
 
 
-
-class LRUCache:
-    """Simple Least Recently Used (LRU) cache for Image objects."""
-    def __init__(self, capacity: int):
-        self.cache = OrderedDict()
-        self.capacity = capacity
-        self._lock = threading.Lock()
-
-    def get(self, key: tuple) -> Optional[Image.Image]:
-        with self._lock:
-            if key not in self.cache:
-                return None
-            else:
-                self.cache.move_to_end(key)
-                return self.cache[key]
-
-    def put(self, key: tuple, value: Image.Image):
-        if not isinstance(value, Image.Image):
-            print(f"Cache Warning: Attempted to cache non-Image object for key {key}")
-            return
-        with self._lock:
-            try:
-                # Ensure image is fully loaded before caching
-                if hasattr(value, 'load'):
-                    value.load()
-            except Exception as e:
-                print(f"Cache Warning: Failed to load image data before caching key {key}: {e}")
-                return
-
-            if key in self.cache:
-                self.cache[key] = value
-                self.cache.move_to_end(key)
-            else:
-                if len(self.cache) >= self.capacity:
-                    # Remove oldest entry
-                    evicted_key, evicted_image = self.cache.popitem(last=False)
-                    try:
-                        # Close evicted image to free memory
-                        if hasattr(evicted_image, 'close'):
-                            evicted_image.close()
-                    except Exception:
-                        pass
-                self.cache[key] = value
-
-    def clear(self):
-        with self._lock:
-            self.cache.clear()
-
-    def resize(self, new_capacity: int):
-        if new_capacity <= 0:
-            raise ValueError("Cache capacity must be positive.")
-        with self._lock:
-            self.capacity = new_capacity
-            while len(self.cache) > self.capacity:
-                self.cache.popitem(last=False)
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self.cache)
-
-    def __contains__(self, key: tuple) -> bool:
-        with self._lock:
-            return key in self.cache
-
-
-class ZipFileManager:
+class LegacyZipFileManager:
     """Manages opening and closing of ZipFile objects to avoid resource leaks."""
     def __init__(self, max_open_files: int = 10):
         self._open_files: OrderedDict = OrderedDict()
@@ -222,7 +159,7 @@ class ZipScanner:
                     has_at_least_one_file = True
                     filename = member_info.filename
 
-                    if self._is_image_file(filename):
+                    if _is_image_file(filename):
                         image_count += 1
                         if collect_members:
                             all_image_members.append(filename)
@@ -328,11 +265,10 @@ class ZipScanner:
 
     @staticmethod
     def _is_image_file(filename: str) -> bool:
-        IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'}
-        if not filename or filename.endswith('/'):
-            return False
-        _root, ext = os.path.splitext(filename)
-        return ext.lower() in IMAGE_EXTENSIONS
+        """Check if a file is an image based on its extension."""
+        image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.ico'}
+        _, ext = os.path.splitext(filename.lower())
+        return ext in image_extensions
 
 
 class LoadResult:
@@ -355,72 +291,28 @@ class ImageLoaderSignals(QObject):
     image_loaded = Signal(object)  # Signal carrying LoadResult object
 
 
-def load_image_data_async(
-    zip_path: str,
+def async_load_image_from_zip(
+    zf,
     member_name: str,
-    max_load_size: int,
     target_size: Optional[Tuple[int, int]],
-    signals: Optional[ImageLoaderSignals],
     cache: LRUCache,
     cache_key: tuple,
-    zip_manager: ZipFileManager,
-    performance_mode: bool,
-    force_reload: bool = False
+    signals: Optional['ImageLoaderSignals'] = None,
+    performance_mode: bool = False
 ):
     """
-    Asynchronously loads image data from a ZIP archive member using Qt signals instead of queues.
+    Asynchronously loads an image from a ZIP file member.
+    Can emit signals if provided, otherwise returns the result directly.
     """
-    if not force_reload:
-        cached_image = cache.get(cache_key)
-        if cached_image is not None:
-            try:
-                if target_size:
-                    img_to_process = cached_image.copy()
-                    resampling_method = (
-                        Image.Resampling.NEAREST if performance_mode
-                        else Image.Resampling.LANCZOS
-                    )
-                    img_to_process.thumbnail(target_size, resampling_method)
-                    result = LoadResult(success=True, data=img_to_process, cache_key=cache_key)
-                else:
-                    # Return the cached image directly if no resizing needed
-                    result = LoadResult(success=True, data=cached_image, cache_key=cache_key)
-                
-                if signals is not None:
-                    signals.image_loaded.emit(result)
-                    return
-                else:
-                    return result
-            except Exception as e:
-                print(f"Async Load Warning: Error processing cached image for {cache_key}: {e}")
-
-    zf = zip_manager.get_zipfile(zip_path)
-    if zf is None:
-        result = LoadResult(success=False, error_message="Cannot open ZIP", cache_key=cache_key)
-        if signals is not None:
-            signals.image_loaded.emit(result)
-            return
-        else:
-            return result
-
     try:
-        member_info = zf.getinfo(member_name)
-
-        if member_info.file_size == 0:
-            result = LoadResult(success=False, error_message="Image file empty", cache_key=cache_key)
+        # Check cache first
+        cached_img = cache.get(cache_key)
+        if cached_img is not None:
             if signals is not None:
-                signals.image_loaded.emit(result)
+                signals.image_loaded.emit(cached_img)
                 return
             else:
-                return result
-        if member_info.file_size > max_load_size:
-            err_msg = f"Too large ({_format_size(member_info.file_size)} > {_format_size(max_load_size)})"
-            result = LoadResult(success=False, error_message=err_msg, cache_key=cache_key)
-            if signals is not None:
-                signals.image_loaded.emit(result)
-                return
-            else:
-                return result
+                return cached_img
 
         image_data = zf.read(member_name)
         with io.BytesIO(image_data) as image_stream:

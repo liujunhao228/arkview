@@ -7,17 +7,8 @@ from typing import Optional, List, Tuple
 from dataclasses import dataclass
 from PIL import Image
 
-
-def _format_size(size_bytes: int) -> str:
-    """Formats byte size into a human-readable string."""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024**2:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024**3:
-        return f"{size_bytes / 1024**2:.1f} MB"
-    else:
-        return f"{size_bytes / 1024**3:.1f} GB"
+# Import configuration
+from ..config import parse_human_size
 
 
 @dataclass
@@ -29,13 +20,13 @@ class ZipFileInfo:
     mod_time: Optional[float]
     file_size: Optional[int]
     image_count: int
-    
+
     def get_formatted_size(self) -> str:
         """Format file size into human-readable string."""
         if self.file_size is None:
             return "Unknown"
-            
-        return _format_size(self.file_size)
+
+        return parse_human_size(self.file_size)
 
 
 @dataclass
@@ -73,20 +64,26 @@ class AppConfig:
     thread_pool_workers: int = 8
     app_version: str = "4.0 - Rust-Python Hybrid"
     image_extensions: set = None
-    
+
     def __post_init__(self):
+        from ..config import CONFIG  # Import here to avoid circular import
         if self.image_extensions is None:
-            self.image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'}
+            self.image_extensions = CONFIG["IMAGE_EXTENSIONS"]
 
 
 class ImageExtensions:
     """Standard image extensions supported by the application."""
-    EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.ico'}
-    
+
     @classmethod
     def is_image_file(cls, filename: str) -> bool:
         """Check if a file is an image based on its extension."""
-        if not filename or filename.endswith('/'):
-            return False
-        _, ext = os.path.splitext(filename)
-        return ext.lower() in cls.EXTENSIONS
+        try:
+            from ..core import arkview_core
+            return arkview_core.is_image_file(filename)
+        except ImportError:
+            # Fallback to Python implementation if Rust extension is not available
+            if not filename or filename.endswith('/'):
+                return False
+            _, ext = os.path.splitext(filename)
+            from ..config import CONFIG  # Import here to avoid circular import
+            return ext.lower() in CONFIG["IMAGE_EXTENSIONS"]

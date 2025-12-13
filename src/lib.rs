@@ -11,6 +11,22 @@ const IMAGE_EXTENSIONS: &[&str] = &[
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp", ".ico",
 ];
 
+/// 检查文件名是否为支持的图像格式
+#[pyfunction]
+fn is_image_file(filename: &str) -> bool {
+    if filename.is_empty() || filename.ends_with('/') {
+        return false;
+    }
+
+    filename
+        .rfind('.')
+        .map(|dot_pos| {
+            let ext = &filename[dot_pos..].to_lowercase();
+            IMAGE_EXTENSIONS.contains(&ext.as_str())
+        })
+        .unwrap_or(false)
+}
+
 /// ZIP文件扫描器
 ///
 /// 分析ZIP文件内容，检查是否仅包含图像文件，
@@ -21,6 +37,12 @@ pub struct ZipScanner {
     image_extensions: HashSet<String>,
 }
 
+// 定义常量
+const MAX_FILE_SIZE: u64 = 500 * 1024 * 1024;  // 500MB
+const MAX_ENTRIES: usize = 10_000;              // 10,000 entries
+const ENTRY_LIMIT: usize = 1_000;               // 1,000 entries
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);  // 15 seconds
+
 #[pymethods]
 impl ZipScanner {
     /// 创建新的ZipScanner实例
@@ -30,7 +52,7 @@ impl ZipScanner {
             .iter()
             .map(|ext| ext.to_lowercase())
             .collect();
-        
+
         ZipScanner {
             image_extensions: extensions,
         }
@@ -41,7 +63,7 @@ impl ZipScanner {
         if filename.is_empty() || filename.ends_with('/') {
             return false;
         }
-        
+
         filename
             .rfind('.')
             .map(|dot_pos| {
@@ -87,11 +109,10 @@ impl ZipScanner {
                     .ok()
                     .map(|d| d.as_secs_f64())
             });
-        
+
         let file_size = metadata.len();
 
-        // 限制处理大文件（500MB）
-        const MAX_FILE_SIZE: u64 = 500 * 1024 * 1024;
+        // 限制处理大文件
         if file_size > MAX_FILE_SIZE {
             return Ok((false, None, mod_time, Some(file_size), 0));
         }
@@ -108,9 +129,8 @@ impl ZipScanner {
         };
 
         let total_entries = zip.len();
-        
+
         // 限制处理过多条目
-        const MAX_ENTRIES: usize = 10000;
         if total_entries > MAX_ENTRIES {
             return Ok((false, None, mod_time, Some(file_size), 0));
         }
@@ -121,28 +141,27 @@ impl ZipScanner {
         } else {
             Vec::new()
         };
-        
+
         let mut image_count = 0u32;
         let mut has_at_least_one_file = false;
 
-        // 设置处理超时（15秒）
+        // 设置处理超时
         let start_time = std::time::Instant::now();
-        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
         // 检查条目内容
-        const ENTRY_LIMIT: usize = 1000;
         let check_limit = total_entries.min(ENTRY_LIMIT);
-        
+
         for i in 0..check_limit {
             // 检查超时
             if start_time.elapsed() > TIMEOUT {
                 return Ok((false, None, mod_time, Some(file_size), image_count));
             }
 
-            let file = match zip.by_index(i) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
+            let file_result = zip.by_index(i);
+            if let Err(_) = file_result {
+                continue;
+            }
+            let file = file_result.unwrap();
 
             if file.is_dir() {
                 continue;
@@ -185,7 +204,7 @@ impl ZipScanner {
         collect_members: Option<bool>,
     ) -> PyResult<Vec<(String, bool, Option<Vec<String>>, Option<f64>, Option<u64>, u32)>> {
         let should_collect = collect_members.unwrap_or(true);
-        
+
         let results = zip_paths
             .into_par_iter()
             .map(|zip_path| {
@@ -197,7 +216,7 @@ impl ZipScanner {
                 }
             })
             .collect();
-        
+
         Ok(results)
     }
 }
@@ -305,5 +324,6 @@ fn arkview_core(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ZipScanner>()?;
     m.add_class::<ImageProcessor>()?;
     m.add_function(wrap_pyfunction!(format_size, m)?)?;
+    m.add_function(wrap_pyfunction!(is_image_file, m)?)?;
     Ok(())
 }

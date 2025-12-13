@@ -1,40 +1,59 @@
 """
 ZIP service implementation for Arkview.
-Handles ZIP file analysis and processing operations.
+Handles scanning and analysis of ZIP archives.
 """
 
 import os
+import traceback
 import zipfile
-import threading
-from typing import List, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
-
-try:
-    from ..core import rust_bindings
-    RUST_AVAILABLE = True
-except ImportError:
-    RUST_AVAILABLE = False
-    rust_bindings = None
+from pathlib import Path
+from PySide6.QtCore import QObject, Signal
 
 from ..core.models import ZipFileInfo
 from ..core.file_manager import ZipFileManager
+try:
+    from ..core import arkview_core
+    RUST_AVAILABLE = True
+    ZipScannerRust = arkview_core.ZipScanner
+except ImportError:
+    RUST_AVAILABLE = False
+    ZipScannerRust = None
 
 
-class ZipService:
-    """ZIP file analysis service with Rust acceleration."""
+class ZipService(QObject):
+    """Service for handling ZIP archive scanning and analysis operations."""
+    
+    # Signals for async operations
+    scanCompleted = Signal(list)  # List[ZipFileInfo]
+    scanProgress = Signal(int, int)  # current, total
+    scanError = Signal(str, str)  # path, error_message
     
     def __init__(self):
-        self.rust_scanner = rust_bindings.ZipScanner() if RUST_AVAILABLE else None
+        super().__init__()
+        self.executor = ThreadPoolExecutor(max_workers=4)
         self.zip_manager = ZipFileManager()
+        if RUST_AVAILABLE:
+            self.zip_scanner = ZipScannerRust()
+        else:
+            self.zip_scanner = None
 
+    def get_zipfile(self, zip_path: str) -> Optional[zipfile.ZipFile]:
+        """Get a ZipFile object, opening it if necessary.
+        
+        This is an adapter method that forwards to the internal zip_manager.
+        """
+        return self.zip_manager.get_zip(zip_path)
+    
     def analyze_zip(self, zip_path: str, collect_members: bool = True) -> Tuple[bool, Optional[List[str]], Optional[float], Optional[int], int]:
         """
         Analyze a ZIP file to determine if it contains only image files.
         Uses Rust for performance when available.
         """
-        if RUST_AVAILABLE and self.rust_scanner:
+        if RUST_AVAILABLE and self.zip_scanner:
             try:
-                return self.rust_scanner.analyze_zip(zip_path, collect_members)
+                return self.zip_scanner.analyze_zip(zip_path, collect_members)
             except Exception as e:
                 print(f"Rust scanner error for {zip_path}: {type(e).__name__} - {e}")
                 # Fall back to Python implementation if Rust fails
@@ -187,5 +206,10 @@ class ZipService:
     @staticmethod
     def _is_image_file(filename: str) -> bool:
         """Check if a file is an image based on its extension."""
-        from ..core.models import ImageExtensions
-        return ImageExtensions.is_image_file(filename)
+        try:
+            from ..core import arkview_core
+            return arkview_core.is_image_file(filename)
+        except ImportError:
+            # Fallback to Python implementation if Rust extension is not available
+            from ..core.models import ImageExtensions
+            return ImageExtensions.is_image_file(filename)

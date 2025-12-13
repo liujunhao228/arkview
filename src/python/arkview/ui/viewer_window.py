@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QPushButton, QToolBar, QSizePolicy, QStatusBar
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QPixmap, QAction, QKeySequence, QKeyEvent
+from PySide6.QtGui import QPixmap, QAction, QKeySequence, QKeyEvent, QWheelEvent
 
 from ..core.file_manager import ZipFileManager
 from ..core.models import LoadResult
@@ -25,63 +25,51 @@ class ImageViewerWindow(QMainWindow):
     
     def __init__(
         self,
-        zip_path: str,
-        image_members: List[str],
-        initial_index: int,
         image_service: ImageService,
-        zip_manager: ZipFileManager,
-        config: dict,
-        performance_mode: bool,
         parent=None
     ):
         super().__init__(parent)
         
-        self.zip_path = zip_path
-        self.image_members = image_members
-        self.current_index = initial_index
         self.image_service = image_service
-        self.zip_manager = zip_manager
-        self.config = config
-        self.performance_mode = performance_mode
-        
-        self.pixmap = None
+        self.current_pixmap: Optional[QPixmap] = None
         self.scale_factor = 1.0
-        self.min_scale = config["VIEWER_MIN_ZOOM"]
-        self.max_scale = config["VIEWER_MAX_ZOOM"]
-        self.zoom_factor = config["VIEWER_ZOOM_FACTOR"]
+        self.min_scale = 0.1
+        self.max_scale = 10.0
+        self.zoom_factor = 1.2
+        self.auto_fit = True  # 默认启用自动适应窗口大小
+        self.performance_mode = False
+        
+        # Image state
+        self.current_zip_path: Optional[str] = None
+        self.image_members: List[str] = []
+        self.current_index = 0
         
         self._setup_ui()
-        self._load_current_image()
+        self._setup_toolbar()
+        self._setup_shortcuts()
         self._apply_dark_theme()
         
     def _setup_ui(self):
-        """Setup the viewer UI."""
-        self.setWindowTitle(f"Arkview Viewer - {Path(self.zip_path).name}")
-        self.resize(800, 600)
+        """Setup the main UI components."""
+        self.setWindowTitle("Image Viewer")
+        self.setGeometry(100, 100, 800, 600)
         
         # Central scroll area
         self.scroll_area = QScrollArea()
         self.scroll_area.setAlignment(Qt.AlignCenter)
         self.scroll_area.setWidgetResizable(True)
+        self.setCentralWidget(self.scroll_area)
         
         # Image label
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.image_label.setScaledContents(False)
-        
+        self.image_label.setMouseTracking(True)
         self.scroll_area.setWidget(self.image_label)
-        self.setCentralWidget(self.scroll_area)
-        
-        # Toolbar
-        self._setup_toolbar()
         
         # Status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        
-        # Keyboard shortcuts
-        self._setup_shortcuts()
         
     def _apply_dark_theme(self):
         """Apply dark theme to the viewer window."""
@@ -156,6 +144,13 @@ class ImageViewerWindow(QMainWindow):
         reset_zoom_action.setShortcut(QKeySequence("Ctrl+0"))
         toolbar.addAction(reset_zoom_action)
         
+        # Auto fit
+        self.auto_fit_action = QAction("Auto Fit", self)
+        self.auto_fit_action.setCheckable(True)
+        self.auto_fit_action.setChecked(True)
+        self.auto_fit_action.toggled.connect(self.toggle_auto_fit)
+        toolbar.addAction(self.auto_fit_action)
+        
         toolbar.addSeparator()
         
         # Performance mode toggle
@@ -183,49 +178,143 @@ class ImageViewerWindow(QMainWindow):
         
         try:
             # 修复：将target_size设为None，这样就不会加载缩略图而是完整图像
+            target_size = None
+            cache_key = (self.current_zip_path, member_name)
+            
             result = self.image_service.load_image_data_async(
-                self.zip_path, member_name, 32 * 1024 * 1024, None, 
-                (self.zip_path, member_name), self.performance_mode
+                self.current_zip_path,
+                member_name,
+                100 * 1024 * 1024,  # max_load_size
+                target_size,
+                cache_key,
+                self.performance_mode
             )
             
-            if result.success and result.data:
-                self.display_image(result.data)
-                self.status_bar.showMessage(
-                    f"{member_name} ({result.data.width}×{result.data.height}) "
-                    f"[{ 'Performance' if self.performance_mode else 'Quality' } mode]"
-                )
-            else:
-                self.status_bar.showMessage(f"Failed to load {member_name}")
+            if result and result.success:
+                self._on_image_loaded(result)
+                # 预加载相邻图片
+                self._preload_neighbor_images()
+            elif result:
+                self.status_bar.showMessage(f"Error: {result.error_message}")
         except Exception as e:
-            self.status_bar.showMessage(f"Error loading {member_name}: {str(e)}")
+            self.status_bar.showMessage(f"Error loading image: {str(e)}")
             
-    def display_image(self, image):
-        """Display a PIL Image."""
+    def _preload_neighbor_images(self):
+        """预加载相邻图片"""
+        if not self.image_members or not self.current_zip_path:
+            return
+            
         try:
-            # Convert PIL Image to QPixmap
-            qt_image = PIL.ImageQt.ImageQt(image)
-            self.pixmap = QPixmap.fromImage(qt_image)
+            # 使用图像服务预加载相邻图片
+            neighbor_count = 2 if not self.performance_mode else 1
+            target_size = None  # 预加载全尺寸图像
             
-            # Reset scale factor
-            self.scale_factor = 1.0
-            
-            # Display the image
-            self._update_image_display()
+            # 这里我们只预加载下一张图片以提高性能
+            if self.current_index + 1 < len(self.image_members):
+                next_member = self.image_members[self.current_index + 1]
+                cache_key = (self.current_zip_path, next_member)
+                
+                # 检查是否已在缓存中
+                cached_image = self.image_service.cache_service.get(cache_key)
+                if cached_image is None:
+                    # 异步预加载下一张图片
+                    self.image_service.load_image_data_async(
+                        self.current_zip_path,
+                        next_member,
+                        100 * 1024 * 1024,  # max_load_size
+                        target_size,
+                        cache_key,
+                        self.performance_mode
+                    )
         except Exception as e:
-            self.status_bar.showMessage(f"Error displaying image: {str(e)}")
+            print(f"预加载图片时出错: {e}")
             
-    def _update_image_display(self):
-        """Update the image display with current scale."""
-        if self.pixmap:
-            scaled_pixmap = self.pixmap.scaled(
-                self.pixmap.width() * self.scale_factor,
-                self.pixmap.height() * self.scale_factor,
+    def populate(self, zip_path: str, members: List[str], index: int = 0):
+        """Populate the viewer with images from a ZIP file."""
+        self.current_zip_path = zip_path
+        self.image_members = members
+        self.current_index = index
+        self.setWindowTitle(f"Image Viewer - {os.path.basename(zip_path)}")
+        self._load_current_image()
+        
+    def _on_image_loaded(self, result: LoadResult):
+        """Handle loaded image result."""
+        if result.success and result.data:
+            try:
+                from PIL import ImageQt
+                qimage = ImageQt.ImageQt(result.data)
+                self.current_pixmap = QPixmap.fromImage(qimage)
+                self._update_display()
+                self.status_bar.showMessage(
+                    f"Loaded {self.current_index + 1}/{len(self.image_members)} - "
+                    f"{result.data.width}x{result.data.height}"
+                )
+            except Exception as e:
+                self.status_bar.showMessage(f"Error displaying image: {str(e)}")
+        else:
+            self.status_bar.showMessage(f"Error: {result.error_message if result else 'Unknown error'}")
+            
+    def _update_display(self):
+        """Update the image display based on current scale and auto-fit settings."""
+        if not self.current_pixmap:
+            return
+            
+        if self.auto_fit:
+            # 自动适应窗口大小
+            self.image_label.setPixmap(self.current_pixmap.scaled(
+                self.scroll_area.viewport().size(),
                 Qt.KeepAspectRatio,
-                Qt.SmoothTransformation if not self.performance_mode else Qt.FastTransformation
+                Qt.SmoothTransformation
+            ))
+        else:
+            # 按照当前缩放比例显示
+            scaled_pixmap = self.current_pixmap.scaled(
+                self.current_pixmap.size() * self.scale_factor,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
             )
             self.image_label.setPixmap(scaled_pixmap)
-            self.image_label.resize(scaled_pixmap.size())
             
+        # 更新标签大小以匹配图像
+        self.image_label.resize(self.image_label.pixmap().size())
+            
+    def wheelEvent(self, event: QWheelEvent):
+        """Handle mouse wheel events for zooming."""
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        event.accept()
+            
+    def _fit_image_to_window(self):
+        """Scale the image to fit the window size."""
+        if not self.pixmap:
+            return
+            
+        # 获取可用空间（减去一些边距）
+        available_width = self.scroll_area.viewport().width() - 20
+        available_height = self.scroll_area.viewport().height() - 20
+        
+        # 计算缩放比例
+        pixmap_width = self.pixmap.width()
+        pixmap_height = self.pixmap.height()
+        
+        scale_x = available_width / pixmap_width
+        scale_y = available_height / pixmap_height
+        fit_scale = min(scale_x, scale_y)
+        
+        # 应用缩放
+        scaled_pixmap = self.pixmap.scaled(
+            pixmap_width * fit_scale,
+            pixmap_height * fit_scale,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation if not self.performance_mode else Qt.FastTransformation
+        )
+        
+        self.image_label.setPixmap(scaled_pixmap)
+        self.image_label.resize(scaled_pixmap.size())
+        self.scale_factor = fit_scale
+        
     def next_image(self):
         """Go to the next image."""
         if self.image_members and self.current_index < len(self.image_members) - 1:
@@ -241,6 +330,8 @@ class ImageViewerWindow(QMainWindow):
     def zoom_in(self):
         """Zoom in on the image."""
         if self.pixmap:
+            self.auto_fit = False
+            self.auto_fit_action.setChecked(False)
             self.scale_factor = min(self.scale_factor * self.zoom_factor, self.max_scale)
             self._update_image_display()
             self.status_bar.showMessage(f"Zoom: {self.scale_factor:.1f}x")
@@ -248,6 +339,8 @@ class ImageViewerWindow(QMainWindow):
     def zoom_out(self):
         """Zoom out on the image."""
         if self.pixmap:
+            self.auto_fit = False
+            self.auto_fit_action.setChecked(False)
             self.scale_factor = max(self.scale_factor / self.zoom_factor, self.min_scale)
             self._update_image_display()
             self.status_bar.showMessage(f"Zoom: {self.scale_factor:.1f}x")
@@ -255,26 +348,27 @@ class ImageViewerWindow(QMainWindow):
     def reset_zoom(self):
         """Reset image zoom."""
         if self.pixmap:
-            self.scale_factor = 1.0
+            self.auto_fit = True
+            self.auto_fit_action.setChecked(True)
             self._update_image_display()
             self.status_bar.showMessage("Zoom reset")
+            
+    def toggle_auto_fit(self, enabled):
+        """Toggle auto fit mode."""
+        self.auto_fit = enabled
+        self._update_image_display()
+        if enabled:
+            self.status_bar.showMessage("Auto fit enabled")
+        else:
+            self.status_bar.showMessage("Auto fit disabled")
             
     def toggle_performance_mode(self, enabled):
         """Toggle performance mode."""
         self.performance_mode = enabled
         self._load_current_image()
         
-    def keyPressEvent(self, event: QKeyEvent):
-        """Handle key press events."""
-        if event.key() == Qt.Key_Right:
-            self.next_image()
-        elif event.key() == Qt.Key_Left:
-            self.previous_image()
-        elif event.key() == Qt.Key_Space:
-            self.next_image()
-        elif event.key() == Qt.Key_PageDown:
-            self.next_image()
-        elif event.key() == Qt.Key_PageUp:
-            self.previous_image()
-        else:
-            super().keyPressEvent(event)
+    def resizeEvent(self, event):
+        """Handle window resize events."""
+        super().resizeEvent(event)
+        if self.auto_fit and self.current_pixmap:
+            self._update_display()

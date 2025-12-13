@@ -1,19 +1,33 @@
 """
-Main Arkview Application - PySide6 Implementation
+Main entry point for the Arkview application.
 """
 
-from .ui.main_window import MainWindow
 import sys
 from PySide6.QtWidgets import QApplication
 
+from .ui.main_window import MainWindow
+from .services.cache_service import CacheService
+from .services.simple_cache_service import SimpleCacheService
+from .core.file_manager import ZipFileManager
+from .config import USE_SIMPLE_CACHE, DEFAULT_CACHE_CAPACITY
+
 
 def main():
-    """Main entry point."""
+    """Main application entry point."""
     app = QApplication(sys.argv)
-    app.setStyle('Fusion')  # Use Fusion style for consistent look
     
-    main_window = MainWindow()
-    main_window.show()
+    # Initialize core services
+    zip_manager = ZipFileManager()
+    
+    # Choose cache service based on configuration
+    if USE_SIMPLE_CACHE:
+        cache_service = SimpleCacheService(DEFAULT_CACHE_CAPACITY)
+    else:
+        cache_service = CacheService(DEFAULT_CACHE_CAPACITY)
+    
+    # Create and show main window
+    window = MainWindow(cache_service, zip_manager)
+    window.show()
     
     sys.exit(app.exec())
 
