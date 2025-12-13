@@ -10,12 +10,16 @@ from ..core.simple_cache import SimpleLRUCache
 
 
 class SimpleCacheService:
-    """Simplified cache service using the simple LRU cache backend."""
+    """Simplified cache service using the simple LRU cache backend.
+
+    Note: cache keys are plain tuples. See :mod:`arkview.core.cache_keys` for the
+    recommended key helpers that explicitly separate thumbnails/originals and
+    different resolutions.
+    """
 
     def __init__(self, capacity: int = 50):
-        """
-        Initialize the cache service.
-        
+        """Initialize the cache service.
+
         Args:
             capacity: Maximum number of items to store in the cache
         """
@@ -65,10 +69,18 @@ class SimpleCacheService:
         return key in self._cache
 
     def get_stats(self) -> Dict[str, Any]:
-        """
-        Get cache statistics.
-        
-        Returns:
-            Dictionary with cache statistics
-        """
+        """Get cache statistics."""
         return self._cache.stats
+
+    def get_detailed_stats(self) -> Dict[str, Any]:
+        """Compatibility helper for older UI code.
+
+        The legacy UI expected a richer stats payload. We keep it lightweight and
+        avoid expensive per-key analysis here.
+        """
+
+        return {"stats": self.get_stats()}
+
+    def resize_cache(self, new_capacity: int):
+        """Compatibility alias for :meth:`resize`."""
+        self.resize(new_capacity)

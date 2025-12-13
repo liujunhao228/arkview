@@ -4,6 +4,7 @@ Handles scanning and analysis of ZIP archives.
 """
 
 import os
+import threading
 import traceback
 import zipfile
 from typing import List, Dict, Optional, Tuple
@@ -188,11 +189,9 @@ class ZipService(QObject):
         Batch analyzes multiple ZIP files in parallel using Rust.
         Returns list of (zip_path, is_valid, members, mod_time, file_size, image_count) tuples.
         """
-        if RUST_AVAILABLE and self.rust_scanner:
+        if RUST_AVAILABLE and self.zip_scanner:
             try:
-                # For better interruption handling, we might want to process in smaller batches
-                # if we're concerned about hanging in Rust code
-                return self.rust_scanner.batch_analyze_zips(zip_paths, collect_members)
+                return self.zip_scanner.batch_analyze_zips(zip_paths, collect_members)
             except Exception as e:
                 print(f"Batch analysis error, falling back to sequential: {e}")
 

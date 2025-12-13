@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QPixmap, QAction, QKeySequence, QKeyEvent, QWheelEvent
 
+from ..core.cache_keys import ImageCacheKind, make_image_cache_key
 from ..core.file_manager import ZipFileManager
 from ..core.models import LoadResult
 from ..services.image_service import ImageService
@@ -179,8 +180,8 @@ class ImageViewerWindow(QMainWindow):
         try:
             # 修复：将target_size设为None，这样就不会加载缩略图而是完整图像
             target_size = None
-            cache_key = (self.current_zip_path, member_name)
-            
+            cache_key = make_image_cache_key(self.current_zip_path, member_name, ImageCacheKind.ORIGINAL)
+
             result = self.image_service.load_image_data_async(
                 self.current_zip_path,
                 member_name,
@@ -212,8 +213,8 @@ class ImageViewerWindow(QMainWindow):
             # 这里我们只预加载下一张图片以提高性能
             if self.current_index + 1 < len(self.image_members):
                 next_member = self.image_members[self.current_index + 1]
-                cache_key = (self.current_zip_path, next_member)
-                
+                cache_key = make_image_cache_key(self.current_zip_path, next_member, ImageCacheKind.ORIGINAL)
+
                 # 检查是否已在缓存中
                 cached_image = self.image_service.cache_service.get(cache_key)
                 if cached_image is None:

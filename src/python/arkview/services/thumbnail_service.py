@@ -9,7 +9,7 @@ import zipfile
 from typing import Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, UnidentifiedImageError
-from PySide6.QtCore import QObject, Signal, Slot, QThread, QMutex, QMutexLocker
+from PySide6.QtCore import QObject, Signal, Slot, QThread, Qt, QMutex, QMutexLocker
 
 from ..core.models import LoadResult
 from ..core.file_manager import ZipFileManager
@@ -67,8 +67,9 @@ class ThumbnailWorker(QObject):
 
 class ThumbnailService(QObject):
     """Service for handling thumbnail loading and caching operations."""
-    
+
     # Signals for async operations
+    thumbnailRequested = Signal(str, str, object, int, object, bool)
     thumbnailLoaded = Signal(object, tuple)  # LoadResult, cache_key
     batchProcessed = Signal(list)
     errorOccurred = Signal(str, str, str)  # zip_path, member_name, error_msg
@@ -93,16 +94,18 @@ class ThumbnailService(QObject):
         self.worker.moveToThread(self.worker_thread)
         
         # Connect signals
+        self.thumbnailRequested.connect(self.worker.load_thumbnail, Qt.QueuedConnection)
         self.worker.thumbnailLoaded.connect(self.thumbnailLoaded)
-        self.worker.finished.connect(self.worker_thread.quit)
-        
+
         # Start the worker thread
         self.worker_thread.start()
 
     def request_thumbnail(self, zip_path: str, member_path: str, cache_key: tuple,
                          max_size: int, resize_params: tuple, performance_mode: bool):
         """Request loading of a thumbnail."""
-        self.worker.load_thumbnail(zip_path, member_path, cache_key, max_size, resize_params, performance_mode)
+        self.thumbnailRequested.emit(
+            zip_path, member_path, cache_key, max_size, resize_params, performance_mode
+        )
 
     # No need for _on_thumbnail_loaded method as we connect worker directly to thumbnailLoaded signal
 
